@@ -78,7 +78,12 @@ def _rival_rollups(report: dict) -> list[str]:
         lines.append(f"### {rival}")
         s = sentiment.get(rival)
         if s:
-            lines.append(f"- **Sentiment:** {s.get('label', 'NEUTRAL')} ({s.get('score', 0):.0%})")
+            # report is the raw report.jsonb dict, not a validated CompetitiveReport —
+            # guard score the same way _recommendation_heading guards confidence, so a
+            # malformed persisted value can't 500 the export.
+            score = s.get("score")
+            pct = f"{score:.0%}" if isinstance(score, (int, float)) else "n/a"
+            lines.append(f"- **Sentiment:** {s.get('label', 'NEUTRAL')} ({pct})")
         for row in h2h:
             cell = (row.get("rivals") or {}).get(rival)
             if cell is None:

@@ -32,6 +32,14 @@ def export_report(run_id: str, format: str = Query(default="md")) -> Response:
     The rendered markdown is cached on reports.md_export on first export
     (schema.sql documents it as exactly that) so a repeat download for the
     same run is a plain read, not a re-render.
+
+    Untrusted-content note: this markdown embeds model-authored text
+    (executive_summary, SWOT items, rival names, opportunity/recommendation
+    text) verbatim. Served here as an `attachment` (download, not inline
+    render) so the endpoint itself is safe either way — but any consumer that
+    renders this markdown AS HTML must disable/sanitize raw HTML, or a
+    model-injected `<script>`/`<img onerror>` or a `[x](javascript:...)` link
+    becomes stored XSS.
     """
     if format != "md":
         raise HTTPException(status_code=400, detail="unsupported format (only 'md' is available)")
