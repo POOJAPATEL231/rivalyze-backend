@@ -57,6 +57,14 @@ FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 REDIS_URL: str = os.getenv("REDIS_URL", "")
 
+# --- per-competitor intel cache (OFF by default) ---
+# When on, each rival's gathered agent output (news/product/review) is cached, so
+# re-analyzing with an overlapping rival set only calls the agents for NEWLY-added
+# rivals. Fewer LLM calls -> fewer 429s. Safe: any cache miss/error falls back to
+# running the agent. TTL bounds staleness (reused intel can be up to this old).
+COMPETITOR_INTEL_CACHE: bool = _flag("COMPETITOR_INTEL_CACHE")   # default 0 (off)
+COMPETITOR_INTEL_TTL: int = _int_env("COMPETITOR_INTEL_TTL", 86400)  # 24h
+
 # --- JWT user auth ---
 # Secret MUST come from the environment in any shared/deployed run. When it is
 # absent (local/MOCK dev) we mint a random per-process secret so tokens are
