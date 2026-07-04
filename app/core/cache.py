@@ -18,19 +18,37 @@ logger = logging.getLogger(__name__)
 
 # --- Module-level lazy singleton ---
 _redis_client: redis.Redis | None = None
+_redis_init_failed = False
 
 
 def _get_redis() -> redis.Redis | None:
-    """Return a lazy-initialised Redis client, or None if REDIS_URL is not set."""
-    global _redis_client
-    if _redis_client is None:
+    """Return a lazy-initialised Redis client, or None if REDIS_URL is unset or
+    unusable.
+
+    A malformed REDIS_URL — e.g. a bare `host:port` with no `redis://` / `rediss://`
+    scheme — makes `redis.from_url` raise `ValueError`. That MUST degrade to
+    "no Redis" (fall through to Postgres/miss), never propagate into the caller:
+    otherwise a single bad config value crashes cache_get on every search and the
+    whole run comes back empty. The failure is cached so we don't re-parse (and
+    re-log) on every call.
+    """
+    global _redis_client, _redis_init_failed
+    if _redis_client is None and not _redis_init_failed:
         url = os.getenv("REDIS_URL")
         if url:
-            _redis_client = redis.Redis.from_url(
-                url,
-                decode_responses=True,
-                socket_timeout=3,
-            )
+            try:
+                _redis_client = redis.Redis.from_url(
+                    url,
+                    decode_responses=True,
+                    socket_timeout=3,
+                )
+            except Exception as exc:  # noqa: BLE001 — bad scheme / invalid URL / etc.
+                _redis_init_failed = True
+                logger.warning(
+                    "cache: REDIS_URL invalid (%s) — Redis disabled, using Postgres/miss. "
+                    "REDIS_URL needs a scheme, e.g. rediss://:<pwd>@<host>:<port>/0",
+                    type(exc).__name__,
+                )
     return _redis_client
 
 
