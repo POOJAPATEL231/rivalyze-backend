@@ -31,17 +31,19 @@ router = APIRouter(prefix="/api/v1")
 
 @router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
 def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks,
-            refresh: bool = Query(False, description="force a fresh two-phase run even if a "
-                                  "report exists — use when the user wants to re-pick rivals")) -> AnalyzeResponse:
+            cached: bool = Query(False, description="opt in to instantly return the last "
+                                 "completed report for this company instead of running a "
+                                 "fresh analysis. Default runs fresh.")) -> AnalyzeResponse:
     if not req.company.strip() and not (req.idea or "").strip():
         raise HTTPException(status_code=422, detail="provide a company or an idea")
-    # persistence-first: if this company already has a POPULATED report, hand it back
-    # instantly — zero pipeline, zero credits (skips BOTH phases). Skipped when
-    # refresh=true, because the stored report is tied to the competitor set chosen
-    # LAST time: a user who analyzed 2 rivals and now wants 4 must re-run phase 1 and
-    # re-select, not be handed the old 2-rival report. The 24h search cache still
-    # spares the credits for any rival that overlaps the previous run.
-    if req.company.strip() and not refresh:
+    # DEFAULT: always run a fresh two-phase analysis. The stored report is tied to the
+    # rivals chosen LAST time, so silently returning it on a re-run showed stale data
+    # and blocked re-selecting rivals (analyze 2, then want 4). Re-runs are cheap: the
+    # search cache — and the per-rival intel cache when enabled — spare the work for
+    # rivals that overlap the previous run. The instant stored report is now OPT-IN
+    # (?cached=true), e.g. for a "view last analysis" shortcut; past reports are also
+    # available directly via GET /history + GET /reports/{run_id}.
+    if req.company.strip() and cached:
         existing = lifecycle.find_completed(req.company)
         if existing:
             return AnalyzeResponse(job_id=existing, status="completed")

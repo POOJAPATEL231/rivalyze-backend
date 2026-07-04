@@ -1,6 +1,6 @@
-"""POST /analyze?refresh=true must bypass the persistence-first shortcut so a user
-who first analyzed 2 rivals can re-run and re-select (e.g. 4). Default (no refresh)
-still serves the cached report instantly."""
+"""POST /analyze runs a FRESH analysis by default — a re-run must not silently
+return the stored report (that showed stale data and blocked re-selecting rivals).
+The instant stored report is opt-in via ?cached=true."""
 from app.api import routes
 from app.models import AnalyzeRequest, AnalyzeResponse
 
@@ -10,7 +10,7 @@ class _BG:
         pass
 
 
-def test_refresh_flag_controls_persistence_shortcut(monkeypatch):
+def test_default_runs_fresh_not_the_stored_report(monkeypatch):
     seen = {"find": False, "start": False}
 
     def fake_find(company):
@@ -23,16 +23,15 @@ def test_refresh_flag_controls_persistence_shortcut(monkeypatch):
 
     monkeypatch.setattr(routes.lifecycle, "find_completed", fake_find)
     monkeypatch.setattr(routes.lifecycle, "start_run", fake_start)
-
     req = AnalyzeRequest(company="Zomato", domain="Food Delivery")
 
-    # default: serve the cached report, no fresh run
-    resp = routes.analyze(req, _BG(), refresh=False)
-    assert resp.job_id == "old-job-id"
-    assert seen["find"] and not seen["start"]
-
-    # refresh: skip the shortcut entirely, run a fresh two-phase pipeline
-    seen["find"] = False
-    resp = routes.analyze(req, _BG(), refresh=True)
+    # default: fresh run, the stored-report lookup is never consulted
+    resp = routes.analyze(req, _BG(), cached=False)
     assert resp.job_id == "fresh-job-id"
     assert seen["start"] and not seen["find"]
+
+    # opt-in: cached=true serves the stored report instantly
+    seen["start"] = False
+    resp = routes.analyze(req, _BG(), cached=True)
+    assert resp.job_id == "old-job-id"
+    assert seen["find"] and not seen["start"]
