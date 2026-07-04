@@ -16,6 +16,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.core import config
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.models import NewsItem, NewsSignals
@@ -23,8 +24,11 @@ from app.models import NewsItem, NewsSignals
 logger = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_CORPUS_CAP = 5000
+_CORPUS_CAP = config.CORPUS_CAP    # 6500, or 12000 under RICH_SEARCH
 _LOW_SIGNAL_THRESHOLD = 300
+# Report keeps all grounded events; frontend shows the top few. Bound only as a
+# DoS ceiling on model output (must stay <= NewsSignals.items max_length).
+_MAX_ITEMS = 10
 
 
 class _NewsExtraction(BaseModel):
@@ -80,7 +84,8 @@ def _gather_corpus(competitor: str, month: str, search_fn, emit) -> str:
     derived from it can clear the grounding filter."""
     corpus = ""
     for q in (f"{competitor} latest news {month}",
-              f"{competitor} product launch funding {month}"):
+              f"{competitor} product launch funding {month}",
+              f"{competitor} partnership expansion strategy {month}"):
         for r in search_fn(q, emit):
             title = str(r.get("title", "")).strip()
             content = str(r.get("content", "")).strip()
@@ -107,9 +112,9 @@ Rules (use ONLY text between CORPUS START and CORPUS END):
 - impact = one line on the strategic threat or opportunity this creates for
   companies competing with {competitor}.
 - date = YYYY-MM-DD if the corpus states it, else "".
-- Return AT MOST 4 items. Returning 0, 1 or 2 well-sourced items is CORRECT and
-  preferred. If the corpus does not support an item, return fewer — NEVER invent
-  an event or a URL. No supported events -> {{"items": []}}.
+- Return up to 10 items — capture EVERY distinct strategically relevant event the
+  corpus supports (the report keeps them all). Never pad or invent: if the corpus
+  supports only 2 real events, return 2. No supported events -> {{"items": []}}.
 
 WRONG (never do this):
 {{"source_url": "News article"}}
@@ -146,4 +151,4 @@ def _post_filter(items: list[NewsItem], corpus: str) -> list[NewsItem]:
             "source_url": url,
             "date": date if _DATE_RE.fullmatch(date) else "",
         }))
-    return kept[:4]
+    return kept[:_MAX_ITEMS]

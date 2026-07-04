@@ -276,9 +276,17 @@ def gather_node(kind: str, run_fn: Callable[..., Any]) -> NodeFn:
 
     def node(state: dict, emit: EmitFn) -> dict:
         names = [c.name for c in state.get("competitors", [])]
-        if takes_company:
-            return {key: run_fn(names, emit, company=state.get("company", ""))}
-        return {key: run_fn(names, emit)}
+
+        def run_subset(subset: list[str]) -> list:
+            if takes_company:
+                return run_fn(subset, emit, company=state.get("company", ""))
+            return run_fn(subset, emit)
+
+        # intel_cache.gather is a straight pass-through unless COMPETITOR_INTEL_CACHE
+        # is on; when on, it reuses cached per-rival intel and calls run_subset only
+        # for the newly-added rivals.
+        from app.core import intel_cache
+        return {key: intel_cache.gather(kind, names, run_subset, emit)}
     return node
 
 

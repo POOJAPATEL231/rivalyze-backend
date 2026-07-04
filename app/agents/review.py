@@ -36,8 +36,10 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
+from app.core import config
 from app.core.llm_router import complete
 from app.core.search_chain import search
+from app.core.grounding import ground_sources
 from app.models import SentimentIntel
 
 logger = logging.getLogger(__name__)
@@ -64,9 +66,13 @@ MONTH = datetime.now().strftime("%B %Y")  # e.g. "July 2026"
 # — there is not enough text for an honest extraction.
 LOW_SIGNAL_CORPUS_CHARS = 300
 
-# Cap how much corpus we ship to the LLM. ~5k chars is enough for three
-# complaints and keeps the prompt budget predictable.
-CORPUS_CHAR_CAP = 5000
+# Cap how much corpus we ship to the LLM (6.5k default, 12k under RICH_SEARCH).
+CORPUS_CHAR_CAP = config.CORPUS_CAP
+
+# Max complaints / opportunity-gaps kept per competitor (mirrors SentimentIntel).
+# The report keeps them all; the frontend truncates for display. This is a DoS
+# ceiling on model output, not a display cap.
+_MAX_ITEMS = 8
 
 # Whitelist of acceptable sentiment values (mirror the Pydantic Literal).
 _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
@@ -90,7 +96,7 @@ _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
 _SYSTEM_PROMPT = """Mine customer complaints about {competitor} from the corpus
 (reviews, Reddit, forums, app stores).
 
-top_complaints: UP TO 3 SHORT plain strings ONLY. Example: "feature overload".
+top_complaints: UP TO 8 SHORT plain strings ONLY. Example: "feature overload".
 WRONG (do not do this): {{"issue": "overload", "severity": "high"}}
 WRONG (do not do this): ["overload", "high"]
 RIGHT: "feature overload"
@@ -155,6 +161,7 @@ def _run_single(
     for query in (
         f"{competitor} customer complaints problems {MONTH}",
         f"{competitor} negative reviews reddit {MONTH}",
+        f"{competitor} app store G2 trustpilot rating review",
     ):
         try:
             hits = search(query, emit)
@@ -187,7 +194,7 @@ def _run_single(
 
     # 5. Sanitise the model output — these guards are the difference between
     #    a Dashboard that renders cleanly and one that shows "[object Object]".
-    return _sanitise(model_instance, competitor)
+    return _sanitise(model_instance, competitor, corpus)
 
 
 def _build_corpus(raw_results: list[dict]) -> str:
@@ -205,7 +212,7 @@ def _build_corpus(raw_results: list[dict]) -> str:
     return "\n\n".join(parts)[:CORPUS_CHAR_CAP]
 
 
-def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
+def _sanitise(model: SentimentIntel, competitor: str, corpus: str = "") -> SentimentIntel:
     """Return a SentimentIntel whose fields obey the contract.
 
     The router already returned a validated model — this pass is for the
@@ -215,13 +222,13 @@ def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
     """
     # Flatten complaints — strip accidental nesting from weak models.
     clean_complaints: list[str] = []
-    for c in (model.top_complaints or [])[:3]:
+    for c in (model.top_complaints or [])[:_MAX_ITEMS]:
         flat = _flatten_complaint(c)
         if flat:
             clean_complaints.append(flat)
 
     clean_gaps: list[str] = []
-    for g in (model.opportunity_gaps or [])[:3]:
+    for g in (model.opportunity_gaps or [])[:_MAX_ITEMS]:
         flat = _flatten_complaint(g)
         if flat:
             clean_gaps.append(flat)
@@ -229,10 +236,10 @@ def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
     # Coerce sentiment to the enum. Anything else → NEUTRAL (safe default).
     sentiment = model.overall_sentiment if model.overall_sentiment in _SENTIMENT_VALUES else "NEUTRAL"
 
-    # Sources: keep only http(s) URLs that look real. Cap to avoid prompt bloat.
-    sources = [s for s in (model.sources or []) if isinstance(s, str) and s.startswith(("http://", "https://"))]
-    if len(sources) > 8:
-        sources = sources[:8]
+    # Sources: keep ONLY URLs that appear verbatim in the corpus — a model-invented
+    # URL (even a well-formed https one) is dropped so every evidence row is a real,
+    # retrievable source (parity with the news agent). Cap to avoid prompt bloat.
+    sources = ground_sources(list(model.sources or []), corpus)[:8]
 
     return SentimentIntel(
         competitor=competitor,
