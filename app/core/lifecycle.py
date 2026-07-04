@@ -59,14 +59,14 @@ def _pipeline(job_id: str, req: AnalyzeRequest) -> None:
     try:
         job.status, job.current_stage = "running", "discovery"
         emit("system", f"run {job_id} started")
-        result, lane = discovery.run(req.company, req.domain, emit)
+        result = discovery.run(req.company, req.domain, job_id, emit)
         job.result = result
         job.lane_stats = {**lane_stats,
                           "searches": search_mod.stats["searches"],
                           "cache_hits": search_mod.stats["cache_hits"]}
         job.run_id = uuid.uuid4().hex  # stands in for the persisted report row id
         job.status, job.current_stage = "completed", "done"
-        emit("system", f"completed in {time.time() - t0:.1f}s · lane={lane}")
+        emit("system", f"completed in {time.time() - t0:.1f}s")
     except Exception as e:  # belt-and-braces: still never a raw 500 to the poller
         job.status, job.error = "failed", str(e)
         emit("system", f"failed: {e}")
