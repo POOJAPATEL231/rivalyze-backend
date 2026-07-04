@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import threading
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
