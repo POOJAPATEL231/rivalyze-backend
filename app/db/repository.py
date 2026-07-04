@@ -666,11 +666,19 @@ def get_history(limit: int = 20, company: str | None = None) -> list[dict]:
 
 
 # ============================== search cache ==============================
+# Postgres cache freshness. Redis has a per-write TTL, but the write-through
+# Postgres copy had none — so a query whose key never rotates (e.g. the month-less
+# discovery/product/review angles) would serve its FIRST result forever. Rows older
+# than this are ignored (the query re-runs), bounding staleness. Constant, not user
+# input, so it's safe to inline into the interval.
+_SEARCH_CACHE_MAX_AGE = "7 days"
+
+
 def save_search_cache(key: str, value: dict) -> None:
     """Write-through Postgres half of the cache (Redis is the hot layer)."""
     sql = """
         INSERT INTO search_cache (key, value) VALUES (%s, %s::jsonb)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, created_at = now()
     """
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
@@ -678,8 +686,10 @@ def save_search_cache(key: str, value: dict) -> None:
 
 
 def get_search_cache(key: str) -> Optional[dict]:
-    """Postgres-side cache read — the fallback when Redis misses or is down."""
-    sql = "SELECT value FROM search_cache WHERE key = %s"
+    """Postgres-side cache read — the fallback when Redis misses or is down. Ignores
+    rows older than _SEARCH_CACHE_MAX_AGE so stale results are never served forever."""
+    sql = (f"SELECT value FROM search_cache "
+           f"WHERE key = %s AND created_at > now() - interval '{_SEARCH_CACHE_MAX_AGE}'")
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (key,))

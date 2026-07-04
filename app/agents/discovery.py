@@ -34,6 +34,11 @@ class _Extraction(BaseModel):
 GENERIC_GIANTS = {"google", "amazon", "youtube", "microsoft", "meta", "tcs",
                    "infosys", "wipro", "accenture", "reliance"}
 
+# Minimum corpus size before we trust an extraction (mirrors news/product/review).
+# Below this there isn't enough evidence for an honest answer, so a weak lane would
+# just fabricate competitors — degrade to empty instead.
+_LOW_SIGNAL_THRESHOLD = 300
+
 
 def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
     """Discover up to 4 competitors for `company` in `domain`.
@@ -51,8 +56,12 @@ def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
     result = CompetitorSet(competitors=[])
     try:
         corpus = _build_corpus(company, domain, month, emit)
-        if not corpus.strip():
-            emit("discovery", "no search results returned · low signal")
+        # Minimum-corpus guard (parity with news/product/review). Without it, a
+        # near-empty corpus (one thin snippet) still went to extraction, and a weak
+        # lane would INVENT 4 plausible competitors from almost nothing — junk that
+        # then seeds the whole pipeline. Below the threshold we degrade to empty.
+        if len(corpus.strip()) < _LOW_SIGNAL_THRESHOLD:
+            emit("discovery", f"thin corpus ({len(corpus.strip())} chars) · low signal, skipping extraction")
         else:
             prompt = _build_prompt(company, domain, corpus)
             extracted, lane = llm_router.complete("extract", prompt, _Extraction, emit)

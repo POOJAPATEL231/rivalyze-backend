@@ -96,6 +96,9 @@ def get_evidence_by_ids_endpoint(run_id: str = Query(...),
         raise HTTPException(status_code=404, detail="run not found")
     id_list = [i.strip() for i in ids.split(",") if i.strip()]
     rows = repository.get_evidence_by_ids(id_list)
+    # Scope to THIS run: get_evidence_by_ids resolves ids globally, so filter to the
+    # requested run so a caller can't read another run's evidence by id.
+    rows = [r for r in rows if str(r.get("run_id")) == str(run_id)]
     return [EvidenceRow.model_validate(r) for r in rows]
 
 
