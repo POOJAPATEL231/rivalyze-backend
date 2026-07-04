@@ -2,6 +2,8 @@
 
 Two-phase pipeline (Rivalyze_TwoPhase_Pipeline.md):
   POST /api/v1/analyze            (auth) -> {job_id, status:"running_discovery"} (or completed on a persistence hit)
+  POST /api/v1/analyze/company    (auth) -> same as /analyze, company + domain mode only
+  POST /api/v1/analyze/idea       (auth) -> same as /analyze, idea mode only
   GET  /api/v1/runs/{id}          (auth) -> poll shape; parks at awaiting_confirmation with competitors
   POST /api/v1/runs/{id}/confirm  (auth) -> {job_id, status:"confirmed"} — the "Deploy the agents" button
   GET  /api/v1/reports/{run_id}   (auth) -> the full CompetitiveReport
@@ -17,6 +19,8 @@ from ..core import lifecycle
 from ..core.auth import require_token
 from ..db import repository
 from ..models import (
+    AnalyzeCompanyRequest,
+    AnalyzeIdeaRequest,
     AnalyzeRequest,
     AnalyzeResponse,
     CompetitiveReport,
@@ -29,10 +33,7 @@ from ..models import (
 router = APIRouter(prefix="/api/v1")
 
 
-@router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
-def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
-    if not req.company.strip() and not (req.idea or "").strip():
-        raise HTTPException(status_code=422, detail="provide a company or an idea")
+def _run_analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
     # persistence-first: if this company already has a completed report, hand it
     # back instantly — zero pipeline, zero credits (skips BOTH phases).
     if req.company.strip():
@@ -40,6 +41,27 @@ def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeRe
         if existing:
             return AnalyzeResponse(job_id=existing, status="completed")
     return lifecycle.start_run(req, background_tasks)
+
+
+@router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
+def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+    if not req.company.strip() and not (req.idea or "").strip():
+        raise HTTPException(status_code=422, detail="provide a company or an idea")
+    return _run_analyze(req, background_tasks)
+
+
+@router.post("/analyze/company", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
+def analyze_company(req: AnalyzeCompanyRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+    """Company + domain mode only — the split-out sibling of /analyze."""
+    full_req = AnalyzeRequest(company=req.company, domain=req.domain, idea=None)
+    return _run_analyze(full_req, background_tasks)
+
+
+@router.post("/analyze/idea", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
+def analyze_idea(req: AnalyzeIdeaRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+    """Idea mode only — the split-out sibling of /analyze."""
+    full_req = AnalyzeRequest(company="", domain="", idea=req.idea)
+    return _run_analyze(full_req, background_tasks)
 
 
 @router.get("/runs/{job_id}", response_model=RunStatus, dependencies=[Depends(require_token)])

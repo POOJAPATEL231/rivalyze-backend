@@ -163,6 +163,39 @@ class AnalyzeRequest(BaseModel):
         return "".join(ch for ch in v if ch.isprintable()).strip()
 
 
+class AnalyzeCompanyRequest(BaseModel):
+    """POST /api/v1/analyze/company — company + domain mode."""
+
+    company: str = Field(min_length=1, max_length=200)
+    domain: str = Field(min_length=1, max_length=200)
+
+    @field_validator("company", "domain")
+    @classmethod
+    def _strip_control_chars(cls, v: str) -> str:
+        return "".join(ch for ch in v if ch.isprintable()).strip()
+
+    @field_validator("company", "domain")
+    @classmethod
+    def _nonblank(cls, v: str) -> str:
+        if not v:
+            raise ValueError("must not be blank")
+        return v
+
+
+class AnalyzeIdeaRequest(BaseModel):
+    """POST /api/v1/analyze/idea — idea mode: a pre-step infers company + domain."""
+
+    idea: str = Field(min_length=1, max_length=500)
+
+    @field_validator("idea")
+    @classmethod
+    def _strip_control_chars(cls, v: str) -> str:
+        v = "".join(ch for ch in v if ch.isprintable()).strip()
+        if not v:
+            raise ValueError("idea must not be blank")
+        return v
+
+
 class AnalyzeResponse(BaseModel):
     job_id: str
     status: str
