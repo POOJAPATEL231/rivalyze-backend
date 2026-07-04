@@ -23,23 +23,29 @@ compares are constant-time to avoid leaking the secret via response timing.
 import secrets
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..models import UserPublic
 from . import config, security, user_store
 
 _UNAUTH = {"WWW-Authenticate": "Bearer"}
 
+# Registered as an OpenAPI security scheme so Swagger shows a proper "Authorize"
+# button (and reliably attaches `Authorization: Bearer <token>`), instead of a
+# raw header text box. auto_error=False keeps OUR fail-closed 503/401 logic in
+# control — the scheme just parses the header, it never rejects on its own.
+_bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Static BEARER_TOKEN or a user access-token (JWT). Paste the token "
+                "only — Swagger adds the 'Bearer ' prefix.",
+)
 
-def _bearer(authorization: Optional[str]) -> Optional[str]:
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[len("Bearer "):].strip()
-        return token or None
-    return None
 
-
-def require_token(authorization: Optional[str] = Header(default=None)) -> None:
-    token = _bearer(authorization)
+def require_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> None:
+    token = credentials.credentials if credentials else None
 
     # 1) static service token (constant-time compare — no early-exit leak)
     if config.BEARER_TOKEN and token and secrets.compare_digest(token, config.BEARER_TOKEN):
@@ -66,8 +72,10 @@ def require_token(authorization: Optional[str] = Header(default=None)) -> None:
                         headers=_UNAUTH)
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> UserPublic:
-    token = _bearer(authorization)
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> UserPublic:
+    token = credentials.credentials if credentials else None
     if not token:
         raise HTTPException(status_code=401, detail="authentication required",
                             headers=_UNAUTH)

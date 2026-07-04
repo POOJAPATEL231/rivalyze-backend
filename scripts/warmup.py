@@ -1,12 +1,20 @@
-"""Warm-up script — sequentially analyze every seed company against the live
-API so demo day starts with warm caches and real /history entries instead of
-cold first-runs.
+"""Warm-up script — drives the full two-phase pipeline for every seed company
+so demo day starts with warm caches, real /history entries, and completed
+reports instead of cold first-runs.
 
 Owner: Dharvi. Spec: dharvi_task.md Module 4 / mihir_prompt.txt (below his
-"=== SPECS BELOW THIS LINE ARE DHARVI'S ===" marker). For each company in
-seed/warmup_companies.json, SEQUENTIALLY (never parallel — free-tier rate
-limits): POST /api/v1/analyze, poll /api/v1/runs/{job_id} every 5s up to 6
-minutes; on failure, retry once after a 60s cooldown, then record failed and
+"=== SPECS BELOW THIS LINE ARE DHARVI'S ===" marker), updated for the
+two-phase pipeline (Rivalyze_TwoPhase_Pipeline.md) that landed after the
+original spec was written: POST /analyze now only runs discovery and PARKS
+the run at awaiting_confirmation; reaching completed requires auto-approving
+the proposed rivals via POST /runs/{id}/confirm and polling again. For each
+company in seed/warmup_companies.json, SEQUENTIALLY (never parallel —
+free-tier rate limits):
+  POST /analyze -> poll to {awaiting_confirmation, completed, failed}
+  -> [if awaiting_confirmation] POST /confirm (approve exactly as discovered)
+  -> poll to {completed, failed}
+On any failure (network error OR a pipeline outcome other than completed),
+retry the WHOLE company once after a 60s cooldown, then record failed and
 continue. Writes seed/warmup_manifest.json (outcome + duration + lane_stats
 per company). --budget N stops the run before the next company once the
 tavily credit counter (GET /api/v1/health's `counters` field) reaches N.
@@ -54,40 +62,72 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _analyze(client: httpx.Client, company: str) -> str:
-    """POST /analyze for one company; returns its job_id."""
+def _analyze(client: httpx.Client, company: str) -> dict:
+    """POST /analyze for one company; returns the full response body
+    ({job_id, status}) — status is "completed" on a persistence-first hit,
+    "running_discovery" otherwise."""
     r = client.post("/api/v1/analyze", json={"company": company, "domain": ""}, headers=_headers())
     r.raise_for_status()
-    return r.json()["job_id"]
+    return r.json()
 
 
-def _poll(client: httpx.Client, job_id: str) -> dict:
-    """Poll /runs/{job_id} every 5s up to 6 minutes.
+def _poll(client: httpx.Client, job_id: str, wanted: set[str]) -> dict:
+    """Poll /runs/{job_id} every 5s up to 6 minutes until status is in `wanted`.
 
-    Returns the final RunStatus dict once status is completed/failed, or a
-    synthetic failed status if the deadline passes first.
+    Returns the final RunStatus dict, or a synthetic failed status if the
+    deadline passes first.
     """
     deadline = time.monotonic() + POLL_TIMEOUT_S
     while time.monotonic() < deadline:
         r = client.get(f"/api/v1/runs/{job_id}", headers=_headers())
         r.raise_for_status()
         status = r.json()
-        if status["status"] in ("completed", "failed"):
+        if status["status"] in wanted:
             return status
         time.sleep(POLL_INTERVAL_S)
     return {"status": "failed", "error": "poll timeout after 6 minutes", "lane_stats": {}}
 
 
+def _confirm(client: httpx.Client, job_id: str, competitors: list[dict]) -> None:
+    """POST /confirm, auto-approving EXACTLY the proposed rivals (no edits) —
+    a warm-up run just needs a completed report, not a curated one."""
+    r = client.post(
+        f"/api/v1/runs/{job_id}/confirm",
+        json={"confirmed_competitors": competitors},
+        headers=_headers(),
+    )
+    r.raise_for_status()
+
+
+def _drive_two_phase(client: httpx.Client, company: str) -> dict:
+    """One pass through the full two-phase flow for `company` (no retry —
+    _run_one wraps this with the retry-once policy). Returns the final
+    RunStatus dict (status completed/failed) with job_id always set."""
+    body = _analyze(client, company)
+    job_id = body["job_id"]
+    status = _poll(client, job_id, {"awaiting_confirmation", "completed", "failed"})
+
+    if status["status"] == "awaiting_confirmation":
+        competitors = (status.get("result") or {}).get("competitors") or []
+        if not competitors:
+            return {"job_id": job_id, "status": "failed", "error": "no competitors proposed", "lane_stats": {}}
+        _confirm(client, job_id, competitors)
+        status = _poll(client, job_id, {"completed", "failed"})
+
+    status.setdefault("job_id", job_id)
+    return status
+
+
 def _run_one(client: httpx.Client, company: str) -> dict:
-    """Analyze one company end-to-end; retry exactly once after a 60s
-    cooldown on failure, then give up and record it as failed."""
+    """Drive one company through the two-phase flow end-to-end; retry the
+    WHOLE thing once after a 60s cooldown on any failure (network error or a
+    pipeline outcome other than completed), then give up and record failed."""
     result: dict = {}
     duration = 0.0
     for attempt in (1, 2):
         t0 = time.monotonic()
         try:
-            job_id = _analyze(client, company)
-            result = _poll(client, job_id)
+            result = _drive_two_phase(client, company)
         except httpx.HTTPError as e:
             result = {"status": "failed", "error": str(e), "lane_stats": {}}
         duration = round(time.monotonic() - t0, 1)
