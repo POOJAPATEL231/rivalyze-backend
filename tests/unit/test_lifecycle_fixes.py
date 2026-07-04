@@ -44,6 +44,36 @@ def test_completed_run_not_flipped_to_failed_by_bookkeeping(monkeypatch):
     assert repository.get_report(rid) is not None                  # report persisted
 
 
+def test_emitter_tracks_live_header_metrics():
+    import app.core.search_chain as sc
+    cid = repository.create_company("MetricCo", "")
+    repository.create_run("metric-job", cid)
+    emit, stats, _ = lifecycle._emitter("metric-job")
+
+    emit("router", "gemini/gemini-2.5-flash · attempt 1")
+    emit("router", "cerebras/gpt-oss-120b · attempt 1")
+    emit("merge", "fused 17 signals · 28 evidence rows · 4 rivals")
+    sc.stats["searches"] += 3                       # simulate 3 real searches this run
+    emit("search", '"q" · tavily')
+
+    assert stats["llm_calls"] == 2                  # summed across lanes
+    assert stats["signals_found"] == 17
+    assert stats["evidence_rows"] == 28
+    assert stats["searches"] >= 3
+    # persisted LIVE (not just at the end) so the poll shows it mid-run
+    persisted = repository.get_run("metric-job")["lane_stats"]
+    assert persisted["llm_calls"] == 2 and persisted["signals_found"] == 17
+
+
+def test_metrics_accumulate_across_phases():
+    # phase 2's emitter must build on phase 1's counts, not overwrite them
+    cid = repository.create_company("AccumCo", "")
+    repository.create_run("accum-job", cid)
+    repository.set_lane_stats("accum-job", {"llm_calls": 4, "searches": 2})
+    _, stats, _ = lifecycle._emitter("accum-job")
+    assert stats["llm_calls"] == 4 and stats["searches"] == 2   # seeded from prior phase
+
+
 def test_set_run_company_updates_the_name():
     m = _MemStore()
     cid = m.create_company("an app for dog walkers to schedule and take payment", "")

@@ -72,29 +72,68 @@ def _slug(text: str) -> str:
     return s[:24] or "idea"
 
 
+# Header metric keys the UI shows (LLM CALLS / SEARCHES / SIGNALS FOUND). Tracked
+# per-run and persisted LIVE so the counters tick up during the run, not just at end.
+_METRIC_KEYS = ("llm_calls", "searches", "cache_hits", "signals_found", "evidence_rows")
+
+
 def _emitter(job_id: str):
-    """A DB-backed event emitter closed over the run's start time, plus a live
-    lane_stats accumulator. Returns (emit, lane_stats, t0)."""
+    """A DB-backed event emitter plus a LIVE per-run metrics accumulator.
+
+    Returns (emit, stats, t0). `stats` carries both per-lane attempt counts and the
+    header metrics (llm_calls / searches / cache_hits / signals_found / evidence_rows)
+    and is written to the run row on every change, so the UI's live counters update
+    mid-run instead of staying 0 until the end. Phase 2 SEEDS from Phase 1's stats so
+    counts accumulate across phases rather than the second phase overwriting the first.
+    """
     t0 = time.time()
-    lane_stats: dict[str, int] = {}
+    # search_chain.stats is a process-global cumulative counter; snapshot it so the
+    # DELTA is attributed to THIS run (exact for the typical one-run-at-a-time case).
+    search_base = dict(search_mod.stats)
+    existing = (repository.get_run(job_id) or {}).get("lane_stats") or {}
+    stats: dict[str, int] = {k: int(v) for k, v in existing.items() if isinstance(v, (int, float))}
+    for k in _METRIC_KEYS:
+        stats.setdefault(k, 0)
+    prior_searches, prior_cache = stats["searches"], stats["cache_hits"]
+
+    def _flush() -> None:
+        try:
+            repository.set_lane_stats(job_id, dict(stats))
+        except Exception:  # noqa: BLE001 — a live-metric write must never break the run
+            pass
 
     def emit(agent: str, msg: str) -> None:
         repository.append_events(
             job_id, [{"t": round(time.time() - t0, 1), "agent": agent, "msg": msg}]
         )
-        if agent == "router":
+        changed = False
+        if agent == "router" and ("attempt" in msg or "MOCK" in msg):
+            stats["llm_calls"] += 1
             lane = msg.split("/")[0].split()[0]
-            lane_stats[lane] = lane_stats.get(lane, 0) + (1 if "attempt" in msg or "MOCK" in msg else 0)
+            stats[lane] = int(stats.get(lane, 0)) + 1
+            changed = True
+        elif agent == "search":
+            stats["searches"] = prior_searches + (search_mod.stats["searches"] - search_base["searches"])
+            stats["cache_hits"] = prior_cache + (search_mod.stats["cache_hits"] - search_base["cache_hits"])
+            changed = True
+        elif agent == "merge":
+            m = re.search(r"fused\s+(\d+)\s+signals.*?(\d+)\s+evidence", msg)
+            if m:
+                stats["signals_found"], stats["evidence_rows"] = int(m.group(1)), int(m.group(2))
+                changed = True
+        if changed:
+            _flush()
 
-    return emit, lane_stats, t0
+    return emit, stats, t0
 
 
 def _persist_lane_stats(job_id: str, lane_stats: dict) -> None:
-    repository.set_lane_stats(job_id, {
-        **lane_stats,
-        "searches": search_mod.stats["searches"],
-        "cache_hits": search_mod.stats["cache_hits"],
-    })
+    """Final durable flush of the run's stats (they are already written live by the
+    emitter; this just guarantees the last values land)."""
+    try:
+        repository.set_lane_stats(job_id, dict(lane_stats))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _report_confidence(report: dict) -> float | None:
