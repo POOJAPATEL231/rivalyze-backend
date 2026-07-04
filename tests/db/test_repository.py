@@ -86,6 +86,25 @@ def test_finish_run(run):
     assert row["finished_at"] is not None
 
 
+def test_finish_run_without_threat_or_confidence(run):
+    """The discovery-only vertical slice completes before a strategist exists
+    to compute threat/confidence — finish_run(job_id) alone must still work."""
+    repo.finish_run(run["job_id"])
+    row = repo.get_run(run["job_id"])
+    assert row["status"] == "completed"
+    assert row["current_stage"] == "done"
+    assert row["threat_level"] is None
+    assert row["report_confidence"] is None
+
+
+def test_fail_run(run):
+    repo.fail_run(run["job_id"], "internal pipeline error")
+    row = repo.get_run(run["job_id"])
+    assert row["status"] == "failed"
+    assert row["error"] == "internal pipeline error"
+    assert row["finished_at"] is not None
+
+
 # ================================ reports ================================
 def test_save_and_get_report_roundtrip(run):
     report = {"company": run["company"]["name"], "threat_level": "HIGH", "recommendations": []}
@@ -118,6 +137,14 @@ def test_save_competitors(run):
             )
             rows = cur.fetchall()
     assert rows == [("Airtable", "indirect"), ("Coda", "direct")]
+
+
+def test_get_competitors(run):
+    repo.save_competitors(run["run_id"], [
+        {"name": "Coda", "category": "direct", "rationale": "docs+db"},
+    ])
+    rows = repo.get_competitors(run["run_id"])
+    assert rows == [{"name": "Coda", "category": "direct", "rationale": "docs+db"}]
 
 
 # ================================ signals =================================
@@ -174,11 +201,11 @@ def test_find_completed_report(run):
 
 def test_get_history_filters_and_orders_newest_first(company):
     job_a = _unique("pytest-job")
-    run_a = repo.create_run(job_a, company["id"])
+    repo.create_run(job_a, company["id"])
     repo.finish_run(job_a, "LOW", 0.2)
 
     job_b = _unique("pytest-job")
-    run_b = repo.create_run(job_b, company["id"])
+    repo.create_run(job_b, company["id"])
     repo.finish_run(job_b, "HIGH", 0.9)
 
     history = repo.get_history(limit=20, company=company["name"])

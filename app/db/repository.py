@@ -16,27 +16,25 @@ MS SQL -> Postgres notes are called out per function where behavior differs.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
-from ..core import config
-
-_pool: Optional[ConnectionPool] = None
+from . import connection
 
 
 def get_pool() -> ConnectionPool:
-    """Lazy singleton connection pool (one per process).
+    """The shared connection pool (delegates to app.db.connection.pool()).
 
-    MS SQL note: replaces ADO.NET's implicit connection pooling — here it's
-    explicit and shared across every repository call via this one function.
+    One pool per process, not one per module: auth/user_store already borrows
+    connections from connection.pool(), which also forces `sslmode=require`
+    for Azure Flexible Server. Kept as its own function (rather than every
+    call site importing connection directly) so the frozen `get_pool()` name
+    other modules already code against still resolves.
     """
-    global _pool
-    if _pool is None:
-        _pool = ConnectionPool(config.DATABASE_URL, min_size=1, max_size=10, open=True)
-    return _pool
+    return connection.pool()
 
 
 def _slugify(name: str) -> str:
@@ -66,7 +64,13 @@ def create_company(name: str, domain: str = "") -> str:
 
 # ================================= runs ==================================
 def create_run(job_id: str, company_id: str) -> str:
-    """Insert the run row; returns the new run id."""
+    """Insert the run row; returns the new run id.
+
+    Takes a company_id, not a name — callers that only have a company name
+    (e.g. lifecycle.start_run) call create_company(name, domain) first and
+    pass its id here. Two small calls instead of a combined one so create_run
+    never silently mutates the companies table.
+    """
     sql = "INSERT INTO runs (job_id, company_id) VALUES (%s, %s) RETURNING id::text"
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
@@ -103,8 +107,14 @@ def set_lane_stats(job_id: str, stats: dict) -> None:
             cur.execute(sql, (Json(stats), job_id))
 
 
-def finish_run(job_id: str, threat: str, confidence: float) -> None:
-    """Mark the run completed with its final threat_level + report_confidence."""
+def finish_run(job_id: str, threat: Optional[str] = None, confidence: Optional[float] = None) -> None:
+    """Mark the run completed, optionally with its threat_level + report_confidence.
+
+    threat/confidence default to None so the current discovery-only vertical
+    slice can call `finish_run(job_id)` before the strategist agent exists to
+    compute them; the full pipeline calls it with both once it lands — same
+    signature either way.
+    """
     sql = """
         UPDATE runs
         SET status = 'completed', current_stage = 'done',
@@ -114,6 +124,19 @@ def finish_run(job_id: str, threat: str, confidence: float) -> None:
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (threat, confidence, job_id))
+
+
+def fail_run(job_id: str, error: str) -> None:
+    """Mark the run failed with a one-line, user-safe error (schema: runs.error).
+
+    Not in the original frozen list — added to close a real gap: finish_run()
+    only ever recorded a SUCCESSFUL run, so a pipeline exception had no row to
+    land on and status='failed' was never actually written anywhere.
+    """
+    sql = "UPDATE runs SET status = 'failed', error = %s, finished_at = now() WHERE job_id = %s"
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (error, job_id))
 
 
 def get_run(job_id: str) -> Optional[dict]:
@@ -168,6 +191,21 @@ def save_competitors(run_id: str, rows: list[dict]) -> None:
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.executemany(sql, params)
+
+
+def get_competitors(run_id: str) -> list[dict]:
+    """Fetch a run's confirmed rival list — feeds RunStatus.result assembly
+    and the Discovery view.
+
+    Not in the original frozen list — added so get_run() can stay a flat row
+    (repository stays DB-shape-only) while callers like lifecycle.py join
+    competitors themselves to build the typed CompetitorSet.
+    """
+    sql = "SELECT name, category, rationale FROM competitors WHERE run_id = %s ORDER BY id"
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (run_id,))
+            return cur.fetchall()
 
 
 # ================================ signals =================================
@@ -249,27 +287,38 @@ def find_completed_report(company_name: str) -> Optional[dict]:
             return cur.fetchone()
 
 
+_HISTORY_BASE = """
+    SELECT r.job_id, c.name AS company, r.threat_level,
+           r.report_confidence AS confidence,
+           COALESCE(r.finished_at, r.started_at) AS created_at
+    FROM runs r
+    JOIN companies c ON c.id = r.company_id
+    WHERE r.status = 'completed'
+"""
+_HISTORY_FILTERED = _HISTORY_BASE + """
+    AND c.name ILIKE %s
+    ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+    LIMIT %s
+"""
+_HISTORY_UNFILTERED = _HISTORY_BASE + """
+    ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+    LIMIT %s
+"""
+
+
 def get_history(limit: int = 20, company: str | None = None) -> list[dict]:
     """Completed runs, newest first, optionally filtered by company (ILIKE substring).
 
+    Two fixed, fully-static queries (filtered/unfiltered) instead of building
+    the WHERE clause dynamically — no string formatting anywhere near SQL text,
+    only `%s` placeholders, so this reads clean under static SAST scanning too.
+
     MS SQL note: ILIKE is Postgres's case-insensitive LIKE — no COLLATE dance needed.
     """
-    where = "WHERE r.status = 'completed'"
-    params: list[Any] = []
     if company:
-        where += " AND c.name ILIKE %s"
-        params.append(f"%{company}%")
-    sql = f"""
-        SELECT r.job_id, c.name AS company, r.threat_level,
-               r.report_confidence AS confidence,
-               COALESCE(r.finished_at, r.started_at) AS created_at
-        FROM runs r
-        JOIN companies c ON c.id = r.company_id
-        {where}
-        ORDER BY COALESCE(r.finished_at, r.started_at) DESC
-        LIMIT %s
-    """
-    params.append(limit)
+        sql, params = _HISTORY_FILTERED, (f"%{company}%", limit)
+    else:
+        sql, params = _HISTORY_UNFILTERED, (limit,)
     with get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, params)
