@@ -22,14 +22,56 @@ import logging
 from collections import Counter
 from datetime import datetime
 
+from pydantic import BaseModel, Field
+
 from app.core.llm_router import complete
 from app.core.merge import EVIDENCE_INDEX_KEY
-from app.models import CompetitiveReport, Swot, UnifiedSignals
+from app.models import (
+    CompetitiveReport,
+    H2HRow,
+    Opportunity,
+    Recommendation,
+    SentimentScore,
+    Swot,
+    UnifiedSignals,
+)
 
 logger = logging.getLogger(__name__)
 
 # Sentinel the MOCK lane keys on to emit a valid CompetitiveReport offline.
 _SENTINEL = "RIVALYZE_STRATEGIST"
+
+_THREATS = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+_SENTIMENTS = {"POSITIVE", "NEUTRAL", "NEGATIVE"}
+
+
+class _RecDraft(BaseModel):
+    action: str = ""
+    rationale: str = ""
+    confidence: float = 0.5  # unbounded here — code RECOMPUTES it downstream
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str = ""
+
+
+class _OppDraft(BaseModel):
+    text: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str = ""
+
+
+class _ReportDraft(BaseModel):
+    """Lenient extraction schema — NO 3-recommendation cap, unbounded confidence /
+    sentiment score, plain-string threat/sentiment. The strict CompetitiveReport is
+    assembled in code AFTER clamping to 3 and recomputing confidence, so a model
+    that over-produces (5 recs) or invents an out-of-range number never fails
+    validation on every lane and silently zeroes the whole report."""
+    threat_level: str = "MEDIUM"
+    executive_summary: str = ""
+    swot: Swot = Field(default_factory=Swot)
+    sentiment: dict = Field(default_factory=dict)
+    head_to_head: list = Field(default_factory=list)
+    opportunities: list[_OppDraft] = Field(default_factory=list)
+    recommendations: list[_RecDraft] = Field(default_factory=list)
 
 
 def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> CompetitiveReport:
@@ -44,24 +86,62 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     valid_ids = sorted(evidence_index.keys())
 
     try:
-        report, lane = complete("reason", _prompt(company, rivals, valid_ids, per_competitor),
-                                 CompetitiveReport, emit)
+        draft, lane = complete("reason", _prompt(company, rivals, valid_ids, per_competitor),
+                               _ReportDraft, emit)
         emit("strategist", f"report synthesized via {lane}")
     except Exception as exc:  # noqa: BLE001 — all lanes exhausted / schema fail
         logger.warning("strategist: synthesis failed: %s", exc)
         emit("strategist", f"low signal: synthesis failed ({type(exc).__name__}) · degraded report")
         return _degraded(company, today, unified)
 
-    # ---- code authority: overwrite what the model must not own ----
-    report.company = company
-    report.analysis_date = today
-    report.low_signal_findings = list(unified.low_signal_findings or [])
+    # ---- code authority: clamp/recompute, then build the STRICT report ----
+    recs = _clean_cited(draft.recommendations, evidence_index, confidence_fn, emit,
+                        kind="recommendation")[:3]
+    opps = _clean_cited(draft.opportunities, evidence_index, confidence_fn, emit,
+                        kind="opportunity")
+    threat = draft.threat_level.upper() if draft.threat_level.upper() in _THREATS else "MEDIUM"
+    return CompetitiveReport(
+        company=company,
+        threat_level=threat,
+        executive_summary=draft.executive_summary or "No executive summary was produced this run.",
+        swot=draft.swot,
+        sentiment=_coerce_sentiment(draft.sentiment),
+        head_to_head=_coerce_h2h(draft.head_to_head),
+        opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
+                       for o in opps],
+        recommendations=[Recommendation(action=r.action, rationale=r.rationale,
+                                        confidence=r.confidence, evidence_ids=r.evidence_ids,
+                                        claim_ref=r.claim_ref) for r in recs],
+        low_signal_findings=list(unified.low_signal_findings or []),
+        analysis_date=today,
+    )
 
-    report.recommendations = _clean_cited(
-        report.recommendations, evidence_index, confidence_fn, emit, kind="recommendation")[:3]
-    report.opportunities = _clean_cited(
-        report.opportunities, evidence_index, confidence_fn, emit, kind="opportunity")
-    return report
+
+def _coerce_sentiment(raw: dict) -> dict:
+    """Model sentiment -> {rival: SentimentScore}, clamping score to [0,1] and any
+    non-enum label to NEUTRAL, dropping anything unparseable."""
+    out: dict = {}
+    for rival, v in (raw or {}).items():
+        try:
+            score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
+            label = (v.get("label") if isinstance(v, dict) else "") or "NEUTRAL"
+            out[str(rival)] = SentimentScore(
+                score=max(0.0, min(1.0, score)),
+                label=label if label in _SENTIMENTS else "NEUTRAL")
+        except Exception:  # noqa: BLE001 — a bad rival costs the rival, not the report
+            continue
+    return out
+
+
+def _coerce_h2h(raw: list) -> list:
+    """Coerce head-to-head rows to H2HRow, dropping malformed ones."""
+    out: list = []
+    for row in (raw or []):
+        try:
+            out.append(H2HRow.model_validate(row))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
