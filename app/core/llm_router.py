@@ -127,15 +127,14 @@ def _mock_completion(prompt: str) -> str:
     if "RIVALYZE_STRATEGIST" in prompt:
         # Strategist (reason lane). Must be sniffed BEFORE the discovery branch —
         # this prompt also contains the word "competitors". Parse the rival names
-        # and the real EVIDENCE_IDS out of the prompt so the mock cites ids that
-        # actually exist (strategist.py drops recs citing unknown ids); the report
-        # then survives the validate node and confidence is code-recomputed.
+        # and a real ev- id out of the prompt so the mock cites an id that actually
+        # exists; confidence is then code-recomputed from it.
         m = re.search(r"COMPETITORS:\s*(.+)", prompt)
         rivals = [r.strip() for r in m.group(1).split(",")] if m else []
         rivals = [r for r in rivals if r and "none" not in r.lower()]
-        m = re.search(r"EVIDENCE_IDS:\s*(.+)", prompt)
-        ids = [i.strip() for i in m.group(1).split(",")] if m else []
-        cite = [i for i in ids if i.startswith("ev-")][:1]
+        # ev- ids now live in the EVIDENCE LEDGER (the flat EVIDENCE_IDS: line was
+        # removed when the ledger replaced it) — pull one straight from the ledger.
+        cite = re.findall(r"ev-[0-9a-f]+", prompt)[:1]
         first = rivals[0] if rivals else "the leading rival"
         return json.dumps({
             "company": "mock",

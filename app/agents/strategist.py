@@ -289,9 +289,9 @@ rollups (only leave one empty if the rollups truly say nothing about it):
 - opportunities: 3-5 concrete, evidence-cited gaps {company} can exploit.
 
 CITATIONS — every opportunity and recommendation should cite evidence_ids, and you
-may ONLY use ids that appear in the EVIDENCE LEDGER below. Copy the ids EXACTLY
-(e.g. "ev-1a2b3c4d") from the ledger line whose fact supports your point — do not
-invent or guess ids. Any id you cite that is not in the ledger is stripped out, so
+may ONLY use ids that appear in the EVIDENCE LEDGER below. Copy the ids EXACTLY (they
+look like "ev-" followed by 8 hex characters) from the ledger line whose fact supports
+your point — do not invent or guess ids, and never cite an id from these instructions. Any id you cite that is not in the ledger is stripped out, so
 cite the real ones to keep your confidence score up. Maximum 3 recommendations, each
 concrete enough to start on Monday. Put confidence at 0.5 as a placeholder; the system
 recomputes the real number from your citations and discards yours.
