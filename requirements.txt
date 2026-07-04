@@ -2,6 +2,12 @@ fastapi>=0.115
 uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
+<<<<<<< HEAD
 redis>=5.0
+=======
+python-dotenv>=1.0        # optional: loads .env at startup
+# dev / test:
+pytest>=8.0
+>>>>>>> c36f062cab23d1077a163609bc77d230a5b0578b
 # optional search fallback:
 # ddgs
