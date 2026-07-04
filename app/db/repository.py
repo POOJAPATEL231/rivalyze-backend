@@ -264,6 +264,32 @@ def get_evidence(run_id: str, claim_ref: str) -> list[dict]:
             return cur.fetchall()
 
 
+def get_evidence_by_ids(evidence_ids: list[str]) -> list[dict]:
+    """Fetch evidence rows by their code-generated ids, in the SAME order as
+    `evidence_ids` — backs report_to_markdown's evidence_lookup callable.
+
+    Not in the original frozen list (that one is claim_ref-based); added
+    because the export builder resolves an Opportunity/Recommendation's
+    `evidence_ids` array directly, not a claim_ref.
+
+    MS SQL note: `= ANY(%s)` is Postgres's array-membership test; psycopg
+    adapts a Python list straight to a text[] parameter, no IN (...) string
+    building needed.
+    """
+    if not evidence_ids:
+        return []
+    sql = """
+        SELECT id, run_id::text, claim_ref, source_type, source_name, url,
+               snippet, source_date, agent, created_at
+        FROM evidence WHERE id = ANY(%s)
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (evidence_ids,))
+            by_id = {row["id"]: row for row in cur.fetchall()}
+    return [by_id[eid] for eid in evidence_ids if eid in by_id]
+
+
 # ============================ persistence-first ============================
 def find_completed_report(company_name: str) -> Optional[dict]:
     """Case-insensitive company match -> most recent completed run, or None.

@@ -179,6 +179,26 @@ def test_save_and_get_evidence(run):
     assert {r["source_name"] for r in rows} == {"TechCrunch", "G2"}
 
 
+def test_get_evidence_by_ids_preserves_input_order(run):
+    id_a, id_b = f"ev-{uuid.uuid4().hex[:8]}", f"ev-{uuid.uuid4().hex[:8]}"
+    repo.save_evidence({
+        "id": id_a, "run_id": run["run_id"], "claim_ref": "rec:bundle-ai",
+        "source_type": "news", "source_name": "TechCrunch", "url": "https://example.com/a",
+        "snippet": "Coda launched an AI feature.", "source_date": "2026-01-01", "agent": "news",
+    })
+    repo.save_evidence({
+        "id": id_b, "run_id": run["run_id"], "claim_ref": "rec:bundle-ai",
+        "source_type": "review", "source_name": "G2", "url": "https://example.com/b",
+        "snippet": "Users like it.", "source_date": "2026-01-02", "agent": "review",
+    })
+    # request in reverse order — result must follow the requested order, not insertion order
+    rows = repo.get_evidence_by_ids([id_b, id_a])
+    assert [r["id"] for r in rows] == [id_b, id_a]
+
+    assert repo.get_evidence_by_ids([]) == []
+    assert repo.get_evidence_by_ids(["ev-does-not-exist"]) == []
+
+
 def test_save_evidence_is_idempotent_on_id(run):
     row = {
         "id": f"ev-{uuid.uuid4().hex[:8]}", "run_id": run["run_id"], "claim_ref": "pricing:x",

@@ -10,6 +10,7 @@ Two layers live here:
   2. API/run-lifecycle models — the request/response and poll shapes the frozen
      /api/v1 contract returns.
 """
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -190,6 +191,18 @@ class RunStatus(BaseModel):
     lane_stats: dict[str, int] = Field(default_factory=dict)
     run_id: Optional[str] = None
     error: Optional[str] = None
+
+
+class HistoryEntry(BaseModel):
+    """One row of GET /api/v1/history. threat_level/confidence are optional:
+    a completed run persisted before the strategist agent existed (or any
+    run finished via finish_run(job_id) with no report yet) has neither."""
+
+    job_id: str
+    company: str
+    threat_level: Optional[str] = None
+    confidence: Optional[float] = None
+    created_at: datetime
 
 
 # ============================== auth (users) ==============================
