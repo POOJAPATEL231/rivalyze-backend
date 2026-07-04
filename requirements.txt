@@ -2,6 +2,25 @@ fastapi>=0.115
 uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
+
+# --- Module 1: Cache (Mihir, Sat 11:00–13:00) ---
+# Hot layer: Azure Cache for Redis. `redis` is the official client.
+# `decode_responses=True` is set in code so all reads come back as `str`.
+redis>=5.0
+# Durable layer: Postgres write-through (falls back here on Redis miss/flush).
+# `psycopg[binary]` ships its own libpq wheels — no system-level install on Windows.
+# Sync driver matches the cache module's sync call sites.
+psycopg[binary]>=3.2
+psycopg-pool>=3.2
+
+# --- Tests (offline, no real Redis needed) ---
+# fakeredis is a pure-Python Redis stand-in. It implements the small subset
+# of commands we use (GET / SETEX) and the same connection-error semantics
+# the real client raises, so the same code path is exercised.
+pytest>=8.0
+pytest-asyncio>=0.23
+fakeredis>=2.21
+
 python-dotenv>=1.0        # optional: loads .env at startup
 pyjwt>=2.8                # JWT sign/verify (HS256)
 bcrypt>=4.1              # password hashing (salted, slow)
@@ -9,7 +28,12 @@ email-validator>=2.1      # backs pydantic EmailStr
 psycopg[binary,pool]>=3.2 # Postgres driver + connection pool
 slowapi>=0.1.9            # rate limiting on auth endpoints
 redis>=5.0               # optional: Redis-backed rate-limit storage (REDIS_URL)
+beautifulsoup4>=4.12      # search_chain.py direct-scrape step
+lxml>=5.0                 # faster BS4 parser; html.parser also works as fallback
 # dev / test:
 pytest>=8.0
 # optional search fallback:
 # ddgs
+
+respx>=0.21                # mocks httpx in tests (search_chain, etc.)
+# NOTE: ddgs is banned by spec for search_chain.py — do not re-add.

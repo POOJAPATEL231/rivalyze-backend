@@ -17,9 +17,11 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 # ============================ domain: discovery ============================
 class Competitor(BaseModel):
-    name: str
+    # Bounded because these come from LLM output (potentially prompt-steered) and
+    # are echoed back to the user / persisted; caps limit the blast radius.
+    name: str = Field(max_length=120)
     category: Literal["direct", "indirect"] = "direct"
-    rationale: str = ""
+    rationale: str = Field(default="", max_length=400)
 
 
 class CompetitorSet(BaseModel):
@@ -145,9 +147,19 @@ class CompetitiveReport(BaseModel):
 
 # ========================= API / run lifecycle ==========================
 class AnalyzeRequest(BaseModel):
-    company: str = ""
-    domain: str = ""
-    idea: Optional[str] = None  # idea mode: a pre-step infers company + domain
+    # Untrusted user input. Length caps bound prompt/query cost and DoS surface;
+    # the validator strips control chars so nothing corrupts the slug, event
+    # ledger, logs, or (future) a Location header / DB column.
+    company: str = Field(default="", max_length=200)
+    domain: str = Field(default="", max_length=200)
+    idea: Optional[str] = Field(default=None, max_length=500)  # idea mode: a pre-step infers company + domain
+
+    @field_validator("company", "domain", "idea")
+    @classmethod
+    def _strip_control_chars(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return "".join(ch for ch in v if ch.isprintable()).strip()
 
 
 class AnalyzeResponse(BaseModel):

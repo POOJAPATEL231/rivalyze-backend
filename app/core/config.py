@@ -20,18 +20,13 @@ def _flag(name: str, default: str = "0") -> bool:
 # --- run mode ---
 MOCK_MODE: bool = _flag("MOCK_MODE")        # 1 = deterministic offline lanes, zero keys
 DEMO_RESERVE: bool = _flag("DEMO_RESERVE")  # 1 = hold budget back for the live demo
+AUTH_DISABLED: bool = _flag("AUTH_DISABLED")  # 1 = explicit dev opt-out for auth (never in prod)
 
 # --- API surface ---
-BEARER_TOKEN: str = os.getenv("BEARER_TOKEN", "")            # empty = auth open (dev)
-# Allowed browser origins for CORS. Default "*" = allow any origin, so the UI
-# works from Chrome without pinning a URL. Can be narrowed later to a
-# comma-separated allowlist, e.g. "http://localhost:5173,https://rivalyze.example"
-# (no trailing slashes — the browser's Origin header has no path).
-FRONTEND_ORIGINS: list[str] = [
-    o.strip().rstrip("/") for o in os.getenv("FRONTEND_ORIGIN", "*").split(",") if o.strip()
-]
-# kept for any single-origin references
-FRONTEND_ORIGIN: str = FRONTEND_ORIGINS[0] if FRONTEND_ORIGINS else "*"
+# Empty token is only allowed to serve open when MOCK_MODE or AUTH_DISABLED is set;
+# otherwise auth fails CLOSED (see core/auth.py) so a misconfigured deploy can't run open.
+BEARER_TOKEN: str = os.getenv("BEARER_TOKEN", "")
+FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 
 # --- persistence (wired in when Dharvi's repository lands) ---
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
