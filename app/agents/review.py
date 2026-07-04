@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from app.core.llm_router import complete
 from app.core.search_chain import search
+from app.core.grounding import ground_sources
 from app.models import SentimentIntel
 
 logger = logging.getLogger(__name__)
@@ -193,7 +194,7 @@ def _run_single(
 
     # 5. Sanitise the model output — these guards are the difference between
     #    a Dashboard that renders cleanly and one that shows "[object Object]".
-    return _sanitise(model_instance, competitor)
+    return _sanitise(model_instance, competitor, corpus)
 
 
 def _build_corpus(raw_results: list[dict]) -> str:
@@ -211,7 +212,7 @@ def _build_corpus(raw_results: list[dict]) -> str:
     return "\n\n".join(parts)[:CORPUS_CHAR_CAP]
 
 
-def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
+def _sanitise(model: SentimentIntel, competitor: str, corpus: str = "") -> SentimentIntel:
     """Return a SentimentIntel whose fields obey the contract.
 
     The router already returned a validated model — this pass is for the
@@ -235,10 +236,10 @@ def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
     # Coerce sentiment to the enum. Anything else → NEUTRAL (safe default).
     sentiment = model.overall_sentiment if model.overall_sentiment in _SENTIMENT_VALUES else "NEUTRAL"
 
-    # Sources: keep only http(s) URLs that look real. Cap to avoid prompt bloat.
-    sources = [s for s in (model.sources or []) if isinstance(s, str) and s.startswith(("http://", "https://"))]
-    if len(sources) > 8:
-        sources = sources[:8]
+    # Sources: keep ONLY URLs that appear verbatim in the corpus — a model-invented
+    # URL (even a well-formed https one) is dropped so every evidence row is a real,
+    # retrievable source (parity with the news agent). Cap to avoid prompt bloat.
+    sources = ground_sources(list(model.sources or []), corpus)[:8]
 
     return SentimentIntel(
         competitor=competitor,

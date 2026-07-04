@@ -16,6 +16,7 @@ from datetime import datetime
 
 from app.core.llm_router import complete
 from app.core.search_chain import search
+from app.core.grounding import ground_sources
 from app.models import ProductIntel
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,10 @@ def _process(competitor: str, company: str, emit) -> ProductIntel:
         # drift on capitalization ("click up" vs "ClickUp"); the caller's
         # input string is always authoritative here, not the model's output.
         result.competitor = competitor
+        # Drop any source URL the model invented — keep only those that appear
+        # verbatim in the corpus, so every evidence row is a real, retrievable
+        # source (parity with the news agent's grounding).
+        result.sources = ground_sources(result.sources, corpus)
         emit("product", f"{competitor} · {len(result.pricing_tiers)} tiers via {lane}")
         return result
     except RuntimeError as e:

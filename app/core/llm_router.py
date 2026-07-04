@@ -180,13 +180,17 @@ def _mock_completion(prompt: str) -> str:
         # re-stamps it with the caller's known-good name after validation —
         # validation itself happens before that stamp, so this placeholder
         # just needs to satisfy the schema, not be accurate.
+        # Pull a real SOURCE url from the corpus (like the news mock): product.py
+        # now grounds sources against the corpus, so an invented url would be
+        # stripped and MOCK-mode evidence would come back empty.
+        src = re.findall(r"SOURCE:\s*(https?://\S+)", prompt)[:1]
         return json.dumps({
             "competitor": "mock",
             "pricing_tiers": ["Pro $12/seat: AI included (mock)"],
             "recent_features": ["AI formulas v2 (mock)"],
             "positioning": "docs-as-apps for power teams (mock)",
             "advantages": ["cheaper at small team size (mock)"],
-            "sources": ["https://example.com/mock-source"],
+            "sources": src,
         })
     if "source_url" in prompt:
         # News extraction (_NewsExtraction: {"items": [NewsItem]}).
@@ -212,12 +216,14 @@ def _mock_completion(prompt: str) -> str:
         # validation (same pattern as the product-agent branch above) —
         # validation happens before that stamp, so this placeholder only
         # needs to satisfy the schema, not be accurate.
+        # Pull a real SOURCE url from the corpus (review.py now grounds sources).
+        src = re.findall(r"SOURCE:\s*(https?://\S+)", prompt)[:1]
         return json.dumps({
             "competitor": "mock",
             "top_complaints": ["feature overload (mock)"],
             "opportunity_gaps": ["ship a lightweight tier (mock)"],
             "overall_sentiment": "NEUTRAL",
-            "sources": ["https://example.com/mock-source"],
+            "sources": src,
         })
     return json.dumps({"answer": "mock"})
 
