@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from datetime import datetime
 
@@ -105,7 +106,7 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
         executive_summary=draft.executive_summary or "No executive summary was produced this run.",
         swot=draft.swot,
         sentiment=_coerce_sentiment(draft.sentiment),
-        head_to_head=_coerce_h2h(draft.head_to_head),
+        head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index)),
         opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
                        for o in opps],
         recommendations=[Recommendation(action=r.action, rationale=r.rationale,
@@ -132,14 +133,63 @@ def _coerce_sentiment(raw: dict) -> dict:
     return out
 
 
-def _coerce_h2h(raw: list) -> list:
-    """Coerce head-to-head rows to H2HRow, dropping malformed ones."""
+def _slug(name: str) -> str:
+    """Match merge._slug so a head-to-head rival name maps to the same claim_ref
+    the evidence rows were stored under."""
+    return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "rival"
+
+
+def _claim_refs_by_competitor(index: dict) -> dict:
+    """slug(competitor) -> {source_type: claim_ref} from the evidence graph, so a
+    head-to-head cell can be linked to the drawer-queryable claim_ref for that
+    rival + dimension (e.g. the Pricing cell for Swiggy -> "pricing:swiggy")."""
+    out: dict = {}
+    for meta in (index or {}).values():
+        comp = _slug(meta.get("competitor", ""))
+        stype = meta.get("type", "")
+        cref = meta.get("claim_ref", "")
+        if comp and stype and cref:
+            out.setdefault(comp, {})[stype] = cref
+    return out
+
+
+def _metric_type(metric: str) -> str:
+    """Map a head-to-head dimension name to the evidence source_type most likely to
+    back it, so the cell links to the right slice of the evidence graph."""
+    m = (metric or "").lower()
+    if any(k in m for k in ("pric", "cost", "plan", "tier")):
+        return "pricing"
+    if any(k in m for k in ("sentiment", "complaint", "review", "satisfaction", "support", "nps")):
+        return "review"
+    return "news"  # features, momentum, market position, launches, partnerships, etc.
+
+
+def _first_claim_ref(avail: dict) -> str | None:
+    for t in ("pricing", "review", "news"):
+        if avail.get(t):
+            return avail[t]
+    return None
+
+
+def _coerce_h2h(raw: list, claim_by_slug: dict | None = None) -> list:
+    """Coerce head-to-head rows to H2HRow, dropping malformed ones, and attach a
+    drawer-queryable claim_ref to each rival cell from the evidence graph — so the UI
+    can click a comparison cell and see the sources behind it. A cell whose rival or
+    dimension has no evidence is left uncited (claim_ref stays None), never faked."""
+    claim_by_slug = claim_by_slug or {}
     out: list = []
     for row in (raw or []):
         try:
-            out.append(H2HRow.model_validate(row))
+            h = H2HRow.model_validate(row)
         except Exception:  # noqa: BLE001
             continue
+        stype = _metric_type(h.metric)
+        for rival, cell in (h.rivals or {}).items():
+            if cell.claim_ref:
+                continue  # respect an explicit model-provided ref
+            avail = claim_by_slug.get(_slug(rival), {})
+            cell.claim_ref = avail.get(stype) or _first_claim_ref(avail)
+        out.append(h)
     return out
 
 

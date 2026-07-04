@@ -50,6 +50,33 @@ def test_rec_with_no_citations_is_kept_with_baseline_confidence():
     assert kept[0].confidence == confidence(0, 0, 0)       # 0.25 baseline
 
 
+def test_h2h_cells_get_drawer_queryable_claim_ref():
+    # evidence graph: Coda has pricing + review evidence; the h2h cells must be
+    # linked to the claim_ref the drawer can query, chosen by the dimension.
+    index = {
+        "ev-1": {"competitor": "Coda", "type": "pricing", "claim_ref": "pricing:coda"},
+        "ev-2": {"competitor": "Coda", "type": "review", "claim_ref": "review:coda"},
+    }
+    cbs = strategist._claim_refs_by_competitor(index)
+    raw = [
+        {"metric": "Pricing", "you": "us", "rivals": {"Coda": {"value": "$10"}}},
+        {"metric": "Customer Sentiment", "you": "us", "rivals": {"Coda": {"value": "mixed"}}},
+        {"metric": "Market Position", "you": "us", "rivals": {"Coda": {"value": "leader"}}},
+    ]
+    rows = strategist._coerce_h2h(raw, cbs)
+    assert rows[0].rivals["Coda"].claim_ref == "pricing:coda"          # pricing dimension
+    assert rows[1].rivals["Coda"].claim_ref == "review:coda"           # sentiment -> review
+    # "Market Position" -> news, which has no evidence -> falls back to an available ref
+    assert rows[2].rivals["Coda"].claim_ref in {"pricing:coda", "review:coda"}
+
+
+def test_h2h_cell_without_evidence_stays_uncited():
+    rows = strategist._coerce_h2h(
+        [{"metric": "Pricing", "you": "us", "rivals": {"Ghost": {"value": "?"}}}],
+        strategist._claim_refs_by_competitor({}))
+    assert rows[0].rivals["Ghost"].claim_ref is None                   # never faked
+
+
 def test_run_produces_valid_report_offline():
     # requires MOCK_MODE=1 (set by the CI/test invocation); the mock strategist
     # lane cites the evidence ids present in the prompt so a rec survives.

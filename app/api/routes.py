@@ -77,6 +77,20 @@ def get_report_endpoint(run_id: str) -> CompetitiveReport:
     return CompetitiveReport.model_validate(row["report"])
 
 
+@router.get("/evidence-refs", response_model=list[EvidenceRow], dependencies=[Depends(require_token)])
+def get_evidence_by_ids_endpoint(run_id: str = Query(...),
+                                 ids: str = Query(..., description="comma-separated ev- ids")) -> list[EvidenceRow]:
+    """Fetch evidence rows by id — the drawer for a recommendation/opportunity,
+    which cite evidence_ids (not a claim_ref). Declared BEFORE /evidence/{claim_ref}
+    so the literal path wins over the path-param route. Order preserved to match the
+    citation order; unknown ids are silently skipped (get_evidence_by_ids filters)."""
+    if not repository.run_id_exists(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
+    rows = repository.get_evidence_by_ids(id_list)
+    return [EvidenceRow.model_validate(r) for r in rows]
+
+
 @router.get("/evidence/{claim_ref}", response_model=EvidenceResponse, dependencies=[Depends(require_token)])
 def get_evidence_endpoint(claim_ref: str, run_id: str = Query(...)) -> EvidenceResponse:
     # 404 ONLY when the run itself is unknown; an unknown claim_ref is a valid
