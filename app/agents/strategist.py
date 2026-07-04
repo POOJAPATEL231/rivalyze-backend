@@ -202,6 +202,17 @@ EVIDENCE_IDS: {', '.join(valid_ids) if valid_ids else '(none)'}
 Threat rubric: most markets are MEDIUM; HIGH requires explicit aggressive evidence
 (funding + pricing attack, or a direct feature assault); CRITICAL is existential.
 
+DEPTH REQUIREMENTS — a thin report is a failed report. Fill EVERY section from the
+rollups (only leave one empty if the rollups truly say nothing about it):
+- executive_summary: 3-5 full sentences — the overall threat and WHY, the 2-3 most
+  important rivals and how they pressure {company}, and the single clearest opening.
+- swot: 3-4 SPECIFIC items per quadrant, grounded in the rollups (not generic filler).
+- sentiment: ONE entry per competitor listed in COMPETITORS (score 0-1 + label).
+- head_to_head: 4-6 rows, each a DIFFERENT dimension — e.g. "Pricing", "Key Features",
+  "Market Position", "Customer Sentiment", "Recent Momentum", "Target Segment". Each
+  row's "you" is {company}'s stance; "rivals" compares EVERY competitor on that dimension.
+- opportunities: 3-5 concrete, evidence-cited gaps {company} can exploit.
+
 Every opportunity and recommendation MUST cite evidence_ids drawn ONLY from the
 EVIDENCE_IDS list above — citing an id not in that list deletes the item. Maximum 3
 recommendations, each concrete enough to start on Monday. Put confidence at 0.5 as a

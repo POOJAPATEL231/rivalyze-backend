@@ -70,9 +70,12 @@ def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
 def _build_corpus(company: str, domain: str, month: str, emit) -> str:
     q1 = f"top competitors of {company} in {domain} {month}".strip()
     q2 = f"alternatives to {company} {domain} {month}".strip()
+    # q3 surfaces the company's home MARKET/geography/size so the extractor can
+    # prefer same-market rivals (e.g. an Indian company -> Indian competitors).
+    q3 = f"{company} {domain} market competitors headquarters country".strip()
 
     corpus = ""
-    for q in (q1, q2):
+    for q in (q1, q2, q3):
         for r in search_mod.search(q, emit):
             # defensive .get(): a search provider row missing a key must not
             # raise here (discovery's contract is to never raise).
@@ -90,6 +93,12 @@ Rules:
 - Same business model only. Exclude generic giants (Google, YouTube, Amazon,
   TCS-class conglomerates) unless they compete with an equivalent product
   (e.g. "Google Docs" is valid against a docs tool, "Google" alone is not).
+- GEOGRAPHY & SIZE: First infer {company}'s home market from the results (which
+  country/region it primarily operates in, and its rough size/stage). PRIORITISE
+  rivals that operate in that SAME market and are of a comparable size/stage — an
+  Indian company competes first with Indian/regional players, not US-only ones.
+  Include a global/foreign player ONLY if the results show it genuinely competes
+  in {company}'s market. The rationale must name the shared market/segment.
 - Never include {company} itself.
 - "category" is "direct" or "indirect". "rationale" is one short sentence.
 - Maximum 4. If the results support fewer, return fewer — do not invent.

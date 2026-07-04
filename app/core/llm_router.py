@@ -303,7 +303,20 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                         next_provider = True
                         break
                     r.raise_for_status()
-                    raw = r.json()["choices"][0]["message"]["content"]
+                    # Extract the text defensively: a 200 with an unexpected body
+                    # shape (missing choices/message, content=None on a refusal,
+                    # or non-JSON) must fail over — NOT raise an uncaught
+                    # KeyError/IndexError out of complete() that skips failover and
+                    # zeroes the caller's result (this crashed strategist/reviews).
+                    try:
+                        raw = r.json()["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        raw = None
+                    if not raw:
+                        last_err = f"{name}: empty/malformed response body"
+                        emit("router", f"{name} malformed response · failing over")
+                        next_provider = True
+                        break
                     try:
                         return schema.model_validate_json(_repair_json(raw)), name
                     except ValidationError as ve:
