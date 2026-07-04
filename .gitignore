@@ -4,4 +4,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 warmup_manifest.json
+test_redis.py
+.env.example
+Project_Understanding/
 project_understanding/
