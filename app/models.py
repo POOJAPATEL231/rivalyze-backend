@@ -12,14 +12,16 @@ Two layers live here:
 """
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # ============================ domain: discovery ============================
 class Competitor(BaseModel):
-    name: str
+    # Bounded because these come from LLM output (potentially prompt-steered) and
+    # are echoed back to the user / persisted; caps limit the blast radius.
+    name: str = Field(max_length=120)
     category: Literal["direct", "indirect"] = "direct"
-    rationale: str = ""
+    rationale: str = Field(default="", max_length=400)
 
 
 class CompetitorSet(BaseModel):
@@ -145,9 +147,19 @@ class CompetitiveReport(BaseModel):
 
 # ========================= API / run lifecycle ==========================
 class AnalyzeRequest(BaseModel):
-    company: str = ""
-    domain: str = ""
-    idea: Optional[str] = None  # idea mode: a pre-step infers company + domain
+    # Untrusted user input. Length caps bound prompt/query cost and DoS surface;
+    # the validator strips control chars so nothing corrupts the slug, event
+    # ledger, logs, or (future) a Location header / DB column.
+    company: str = Field(default="", max_length=200)
+    domain: str = Field(default="", max_length=200)
+    idea: Optional[str] = Field(default=None, max_length=500)  # idea mode: a pre-step infers company + domain
+
+    @field_validator("company", "domain", "idea")
+    @classmethod
+    def _strip_control_chars(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return "".join(ch for ch in v if ch.isprintable()).strip()
 
 
 class AnalyzeResponse(BaseModel):
@@ -178,3 +190,50 @@ class RunStatus(BaseModel):
     lane_stats: dict[str, int] = Field(default_factory=dict)
     run_id: Optional[str] = None
     error: Optional[str] = None
+
+
+# ============================== auth (users) ==============================
+def _within_bcrypt_limit(password: str) -> str:
+    # bcrypt only considers the first 72 BYTES; reject longer so no silent
+    # truncation surprises a user (a multibyte password can exceed 72 bytes
+    # well under 72 characters).
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("password must be at most 72 bytes")
+    return password
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def _password_bytes(cls, v: str) -> str:
+        return _within_bcrypt_limit(v)
+
+
+class LoginRequest(BaseModel):
+    # No min_length here on purpose: the login form must not leak the password
+    # policy. Length is only capped so bcrypt never sees oversized input.
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def _password_bytes(cls, v: str) -> str:
+        return _within_bcrypt_limit(v)
+
+
+class TokenResponse(BaseModel):
+    access_token: str          # short-lived JWT (stateless)
+    refresh_token: str         # long-lived opaque token (revocable, stored hashed)
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class UserPublic(BaseModel):
+    user_id: str
+    email: EmailStr
