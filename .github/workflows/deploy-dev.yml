@@ -9,6 +9,9 @@ concurrency:
   group: deploy-dev
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   ACR_LOGIN_SERVER: rivalyzeregistry.azurecr.io
   ACR_REPOSITORY: rivalyze-backend
@@ -49,10 +52,11 @@ jobs:
           images: ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ github.sha }}
 
       - name: Smoke test
+        env:
+          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
         run: |
-          URL="https://rivalyze-backend-webapp-cin-01-cqhtg3bugedbewgc.centralindia-01.azurewebsites.net/"
           for i in $(seq 1 15); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$APP_HEALTH_URL")
             echo "attempt $i: HTTP $code"
             if [ "$code" = "200" ]; then exit 0; fi
             sleep 15

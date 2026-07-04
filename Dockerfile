@@ -15,8 +15,12 @@ COPY static ./static
 COPY seed ./seed
 COPY budgets.json ./budgets.json
 
-# Azure App Service sends traffic to the port defined by WEBSITES_PORT (default 80).
-ENV PORT=80
-EXPOSE 80
+# Non-root user — container-escape doesn't land as root on the host.
+RUN adduser --disabled-password --gecos '' appuser && chown -R appuser /app
+USER appuser
+
+# Port 8000: unprivileged port so we can drop root. Pair with WEBSITES_PORT=8000 on App Service.
+ENV PORT=8000
+EXPOSE 8000
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
