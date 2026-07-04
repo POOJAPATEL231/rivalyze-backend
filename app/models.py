@@ -1,0 +1,180 @@
+"""Rivalyze shared Pydantic models — THE backend contract.
+
+Owner: Drashti (changes = contract changes, announce them). Every agent and
+graph node imports from here; node boundaries validate against these models so
+silent garbage crashes at the seam instead of leaking into the report.
+
+Two layers live here:
+  1. Domain models (discovery → news/product/review → merge → strategist report)
+     — the typed payloads agents produce and the graph carries.
+  2. API/run-lifecycle models — the request/response and poll shapes the frozen
+     /api/v1 contract returns.
+"""
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+# ============================ domain: discovery ============================
+class Competitor(BaseModel):
+    name: str
+    category: Literal["direct", "indirect"] = "direct"
+    rationale: str = ""
+
+
+class CompetitorSet(BaseModel):
+    """Discovery output. Max 4 rivals, never includes the input company."""
+
+    competitors: list[Competitor] = Field(default_factory=list, max_length=4)
+
+
+# ============================== domain: news ==============================
+class NewsItem(BaseModel):
+    event: str
+    impact: str
+    source_url: str  # must be a real URL from corpus; validated in the agent
+    date: str = ""
+
+
+class NewsSignals(BaseModel):
+    competitor: str
+    items: list[NewsItem] = Field(default_factory=list, max_length=4)
+    low_signal: bool = False
+
+
+# ============================ domain: product =============================
+class ProductIntel(BaseModel):
+    competitor: str
+    pricing_tiers: list[str] = Field(default_factory=list)  # PLAIN strings, never objects
+    recent_features: list[str] = Field(default_factory=list)
+    positioning: str = ""
+    advantages: list[str] = Field(default_factory=list)  # framed FOR our company
+    sources: list[str] = Field(default_factory=list)
+    low_signal: bool = False
+
+
+# ============================ domain: reviews =============================
+class SentimentIntel(BaseModel):
+    competitor: str
+    top_complaints: list[str] = Field(default_factory=list, max_length=3)
+    opportunity_gaps: list[str] = Field(default_factory=list, max_length=3)
+    overall_sentiment: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"] = "NEUTRAL"
+    sources: list[str] = Field(default_factory=list)
+    low_signal: bool = False
+
+
+# ======================= domain: evidence & signals =======================
+class EvidenceRow(BaseModel):
+    id: str  # "ev-" + uuid4().hex[:8]
+    run_id: str
+    claim_ref: str  # "pricing:coda" / "rec:bundle-ai"
+    source_type: Literal["news", "pricing", "review", "web", "document"]
+    source_name: str
+    url: str
+    snippet: str = Field(max_length=280)
+    source_date: str = ""
+    agent: str
+
+
+class Signal(BaseModel):
+    run_id: str
+    agent: str
+    competitor: str
+    type: Literal["launch", "funding", "pricing", "feature", "complaint", "sentiment"]
+    payload: dict
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class UnifiedSignals(BaseModel):
+    signals: list[Signal] = Field(default_factory=list)
+    per_competitor: dict = Field(default_factory=dict)  # rollups incl. evidence_ids
+    low_signal_findings: list[str] = Field(default_factory=list)
+
+
+# ============================ domain: report =============================
+class Opportunity(BaseModel):
+    text: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str
+
+
+class Recommendation(BaseModel):
+    action: str
+    rationale: str
+    confidence: float = Field(ge=0.05, le=0.95)  # ALWAYS code-computed
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str
+
+
+class Swot(BaseModel):
+    strengths: list[str] = Field(default_factory=list)
+    weaknesses: list[str] = Field(default_factory=list)
+    opportunities: list[str] = Field(default_factory=list)
+    threats: list[str] = Field(default_factory=list)
+
+
+class SentimentScore(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    label: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"]
+
+
+class H2HCell(BaseModel):
+    value: str
+    claim_ref: Optional[str] = None
+    source_date: Optional[str] = None
+
+
+class H2HRow(BaseModel):
+    metric: str
+    you: str
+    rivals: dict[str, H2HCell] = Field(default_factory=dict)
+
+
+class CompetitiveReport(BaseModel):
+    company: str
+    threat_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    executive_summary: str
+    swot: Swot
+    sentiment: dict[str, SentimentScore] = Field(default_factory=dict)
+    head_to_head: list[H2HRow] = Field(default_factory=list)
+    opportunities: list[Opportunity] = Field(default_factory=list)
+    recommendations: list[Recommendation] = Field(default_factory=list, max_length=3)
+    low_signal_findings: list[str] = Field(default_factory=list)
+    analysis_date: str
+
+
+# ========================= API / run lifecycle ==========================
+class AnalyzeRequest(BaseModel):
+    company: str = ""
+    domain: str = ""
+    idea: Optional[str] = None  # idea mode: a pre-step infers company + domain
+
+
+class AnalyzeResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class RunEvent(BaseModel):
+    t: float    # seconds since run start
+    agent: str  # discovery | router | search | merge | strategist | system
+    msg: str
+
+
+class RunStatus(BaseModel):
+    """Poll shape for GET /api/v1/runs/{job_id}, polled every 2s by the UI.
+
+    In this vertical slice `result` holds the discovery CompetitorSet. In the
+    full pipeline the completed run persists a CompetitiveReport fetched via
+    GET /api/v1/reports/{run_id}; `run_id` is populated on completion so the
+    frontend can navigate to /dash/{run_id}.
+    """
+
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    current_stage: str = "queued"
+    events: list[RunEvent] = Field(default_factory=list)
+    result: Optional[CompetitorSet] = None
+    lane_stats: dict[str, int] = Field(default_factory=dict)
+    run_id: Optional[str] = None
+    error: Optional[str] = None
