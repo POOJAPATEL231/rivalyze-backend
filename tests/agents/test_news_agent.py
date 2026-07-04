@@ -136,17 +136,17 @@ def test_complete_fn_runtime_error_degrades_to_low_signal_never_raises():
     assert result[0].items == []
 
 
-def test_more_than_six_items_capped_at_six():
+def test_items_capped_at_dos_ceiling():
     q1, q2 = two_queries("Coda")
     search_fn = fake_search({q1: [RICH_RESULT], q2: []})
     items = [
         {"event": f"Event {n}", "impact": "x", "source_url": REAL_URL, "date": ""}
-        for n in range(9)
+        for n in range(14)
     ]
     complete_fn = fake_complete(items)
     _, emit = collector()
     result = news.run(["Coda"], emit, search_fn=search_fn, complete_fn=complete_fn)
-    assert len(result[0].items) == 6
+    assert len(result[0].items) == news._MAX_ITEMS  # keeps all up to the DoS ceiling
 
 
 def test_duplicate_event_text_is_deduped_case_insensitively():

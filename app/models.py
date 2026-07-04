@@ -41,7 +41,9 @@ class NewsItem(BaseModel):
 
 class NewsSignals(BaseModel):
     competitor: str
-    items: list[NewsItem] = Field(default_factory=list, max_length=6)
+    # The report keeps ALL grounded events; the frontend decides how many to show
+    # (top 6). max_length is a generous DoS ceiling on LLM output, not a display cap.
+    items: list[NewsItem] = Field(default_factory=list, max_length=10)
     low_signal: bool = False
 
 
@@ -59,8 +61,10 @@ class ProductIntel(BaseModel):
 # ============================ domain: reviews =============================
 class SentimentIntel(BaseModel):
     competitor: str
-    top_complaints: list[str] = Field(default_factory=list, max_length=5)
-    opportunity_gaps: list[str] = Field(default_factory=list, max_length=5)
+    # Report keeps all mined complaints/gaps; frontend truncates for display.
+    # max_length is a generous DoS ceiling on LLM output, not a display cap.
+    top_complaints: list[str] = Field(default_factory=list, max_length=8)
+    opportunity_gaps: list[str] = Field(default_factory=list, max_length=8)
     overall_sentiment: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"] = "NEUTRAL"
     sources: list[str] = Field(default_factory=list)
     low_signal: bool = False

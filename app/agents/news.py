@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _CORPUS_CAP = 6500
 _LOW_SIGNAL_THRESHOLD = 300
-_MAX_ITEMS = 6
+# Report keeps all grounded events; frontend shows the top few. Bound only as a
+# DoS ceiling on model output (must stay <= NewsSignals.items max_length).
+_MAX_ITEMS = 10
 
 
 class _NewsExtraction(BaseModel):
@@ -109,9 +111,9 @@ Rules (use ONLY text between CORPUS START and CORPUS END):
 - impact = one line on the strategic threat or opportunity this creates for
   companies competing with {competitor}.
 - date = YYYY-MM-DD if the corpus states it, else "".
-- Return AT MOST 6 items, prioritising the most strategically significant. Every
-  item must be a DISTINCT event — never pad. If the corpus does not support an item,
-  return fewer — NEVER invent an event or a URL. No supported events -> {{"items": []}}.
+- Return up to 10 items — capture EVERY distinct strategically relevant event the
+  corpus supports (the report keeps them all). Never pad or invent: if the corpus
+  supports only 2 real events, return 2. No supported events -> {{"items": []}}.
 
 WRONG (never do this):
 {{"source_url": "News article"}}

@@ -69,7 +69,9 @@ LOW_SIGNAL_CORPUS_CHARS = 300
 CORPUS_CHAR_CAP = 6500
 
 # Max complaints / opportunity-gaps kept per competitor (mirrors SentimentIntel).
-_MAX_ITEMS = 5
+# The report keeps them all; the frontend truncates for display. This is a DoS
+# ceiling on model output, not a display cap.
+_MAX_ITEMS = 8
 
 # Whitelist of acceptable sentiment values (mirror the Pydantic Literal).
 _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
@@ -93,7 +95,7 @@ _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
 _SYSTEM_PROMPT = """Mine customer complaints about {competitor} from the corpus
 (reviews, Reddit, forums, app stores).
 
-top_complaints: UP TO 5 SHORT plain strings ONLY. Example: "feature overload".
+top_complaints: UP TO 8 SHORT plain strings ONLY. Example: "feature overload".
 WRONG (do not do this): {{"issue": "overload", "severity": "high"}}
 WRONG (do not do this): ["overload", "high"]
 RIGHT: "feature overload"
