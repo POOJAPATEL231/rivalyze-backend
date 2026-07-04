@@ -1,8 +1,11 @@
 """TC-B04 — the strategist owns the numbers and the citations, not the model.
 
-Confidence is recomputed from cited evidence (model numbers discarded); a rec
-citing ONLY unknown evidence ids is deleted; unknown ids are stripped from the
-rest. The MOCK lane exercises the full run() producing a valid report offline.
+Confidence is recomputed from cited evidence (model numbers discarded); unknown
+ids are stripped from every item. A rec that cites ONLY unknown ids is KEPT (with
+those ids stripped and a baseline confidence) rather than deleted — an empty
+recommendations section is worse for the board than a concrete-but-uncited action,
+and code still guarantees no unknown id ever reaches the output. The MOCK lane
+exercises the full run() producing a valid report offline.
 """
 from app.agents import strategist
 from app.core.confidence import confidence
@@ -19,11 +22,13 @@ _INDEX = {
 }
 
 
-def test_rec_citing_only_unknown_evidence_is_dropped():
+def test_rec_citing_only_unknown_evidence_is_kept_with_ids_stripped():
     recs = [Recommendation(action="a", rationale="r", confidence=0.9,
                            evidence_ids=["ev-missing"], claim_ref="rec:1")]
     kept = strategist._clean_cited(recs, _INDEX, confidence, _noop, kind="recommendation")
-    assert kept == []
+    assert len(kept) == 1
+    assert kept[0].evidence_ids == []                      # bogus id stripped, not asserted
+    assert kept[0].confidence == confidence(0, 0, 0)       # baseline, model's 0.9 discarded
 
 
 def test_unknown_ids_stripped_and_confidence_recomputed():

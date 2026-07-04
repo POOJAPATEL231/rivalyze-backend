@@ -55,6 +55,19 @@ LANES = {
 ATTEMPTS_PER_LANE = 2
 TIMEOUT = 45.0
 
+# Response-size budget per task class. Extraction outputs are small (a handful of
+# typed items); the strategist's CompetitiveReport is large — full SWOT, sentiment
+# per rival, 4-6 verbose head-to-head rows, opportunities AND recommendations. At
+# the old flat 1024 the report was TRUNCATED mid-JSON: _repair_json salvaged only
+# up to the last complete "}", silently dropping opportunities/recommendations (the
+# final fields) — the #1 cause of empty recommendations. Reasoning gets a much
+# larger budget; extraction a modest bump for the now-richer agent outputs.
+_MAX_TOKENS = {"reason": 4096, "extract": 1536}
+
+
+def _max_tokens(task_class: str) -> int:
+    return _MAX_TOKENS.get(task_class, 1536)
+
 
 def _repair_json(text: str) -> str:
     """Defensive parse sequence from the lessons doc: strip fences, then
@@ -267,7 +280,7 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                 try:
                     emit("router", f"{name}/{model} · attempt {attempt}{tag}")
                     payload = {"model": model, "temperature": 0.1,
-                               "max_tokens": 1024,  # bound response size/latency/cost
+                               "max_tokens": _max_tokens(task_class),  # task-aware: reason needs room for the full report
                                "response_format": {"type": "json_object"},
                                "messages": [
                                    {"role": "system",

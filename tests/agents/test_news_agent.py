@@ -136,17 +136,17 @@ def test_complete_fn_runtime_error_degrades_to_low_signal_never_raises():
     assert result[0].items == []
 
 
-def test_more_than_four_items_capped_at_four():
+def test_more_than_six_items_capped_at_six():
     q1, q2 = two_queries("Coda")
     search_fn = fake_search({q1: [RICH_RESULT], q2: []})
     items = [
         {"event": f"Event {n}", "impact": "x", "source_url": REAL_URL, "date": ""}
-        for n in range(6)
+        for n in range(9)
     ]
     complete_fn = fake_complete(items)
     _, emit = collector()
     result = news.run(["Coda"], emit, search_fn=search_fn, complete_fn=complete_fn)
-    assert len(result[0].items) <= 4
+    assert len(result[0].items) == 6
 
 
 def test_duplicate_event_text_is_deduped_case_insensitively():
@@ -182,7 +182,11 @@ def test_queries_contain_current_month_and_year():
 
     _, emit = collector()
     news.run(["Coda"], emit, search_fn=spy_search, complete_fn=fake_complete([]))
-    assert seen_queries == [f"Coda latest news {month()}", f"Coda product launch funding {month()}"]
+    assert seen_queries == [
+        f"Coda latest news {month()}",
+        f"Coda product launch funding {month()}",
+        f"Coda partnership expansion strategy {month()}",
+    ]
 
 
 def test_malformed_search_row_missing_keys_never_raises():

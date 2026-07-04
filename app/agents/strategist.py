@@ -83,10 +83,9 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     per_competitor = dict(unified.per_competitor or {})
     evidence_index: dict[str, dict] = per_competitor.pop(EVIDENCE_INDEX_KEY, {}) or {}
     rivals = list(per_competitor.keys())
-    valid_ids = sorted(evidence_index.keys())
 
     try:
-        draft, lane = complete("reason", _prompt(company, rivals, valid_ids, per_competitor),
+        draft, lane = complete("reason", _prompt(company, rivals, evidence_index, per_competitor),
                                _ReportDraft, emit)
         emit("strategist", f"report synthesized via {lane}")
     except Exception as exc:  # noqa: BLE001 — all lanes exhausted / schema fail
@@ -145,20 +144,46 @@ def _coerce_h2h(raw: list) -> list:
 
 
 def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
-    """Drop items whose citations are ALL unknown; strip unknown ids from the rest;
-    recompute confidence (recommendations only) from the surviving evidence."""
+    """Strip unknown evidence ids and recompute confidence (recommendations only)
+    from the surviving evidence.
+
+    A weak model often can't reproduce the opaque `ev-xxxx` ids exactly, so it
+    cites ids that aren't in the index. We used to DELETE any item whose citations
+    were all-unknown — but that routinely zeroed the recommendations section (the
+    headline of the report). A concrete, uncited recommendation is more useful to
+    the board than an empty section, so we now KEEP it with its bogus ids stripped
+    and a floor confidence recomputed from zero evidence (~0.25). Code still owns
+    citations: an unknown id NEVER reaches the output, so nothing false is asserted."""
     kept = []
     for it in items or []:
         original = list(getattr(it, "evidence_ids", []) or [])
         known = [i for i in original if i in index]
         if original and not known:
-            emit("strategist", f"dropped {kind} citing only unknown evidence: {getattr(it, 'claim_ref', '?')}")
-            continue
+            emit("strategist", f"kept {kind} with unverifiable citations stripped: {getattr(it, 'claim_ref', '?')}")
         it.evidence_ids = known
         if hasattr(it, "confidence"):
             it.confidence = _recompute(known, index, confidence_fn)
         kept.append(it)
     return kept
+
+
+def _evidence_ledger(index: dict) -> str:
+    """Render the evidence index as a readable id->fact ledger, grouped by
+    competitor, so the model cites ids it can actually SEE. Each line is
+    `ev-id [type] "snippet" (source)` — a copyable token next to the fact it backs.
+    Bounded so a large graph can't blow the prompt budget."""
+    if not index:
+        return "(no evidence gathered this run)"
+    by_comp: dict[str, list[str]] = {}
+    for eid, meta in index.items():
+        comp = meta.get("competitor", "?")
+        snippet = (meta.get("snippet", "") or "").replace("\n", " ").strip()[:160]
+        line = f"  {eid} [{meta.get('type', '?')}] \"{snippet}\" ({meta.get('source_name', '?')})"
+        by_comp.setdefault(comp, []).append(line)
+    blocks = []
+    for comp, lines in by_comp.items():
+        blocks.append(f"{comp}:\n" + "\n".join(lines))
+    return "\n".join(blocks)[:6000]
 
 
 def _recompute(evidence_ids: list[str], index: dict, confidence_fn) -> float:
@@ -190,14 +215,14 @@ def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveR
     )
 
 
-def _prompt(company: str, rivals: list[str], valid_ids: list[str], rollups: dict) -> str:
-    rollup_json = json.dumps(rollups, ensure_ascii=False, default=str)[:8000]
+def _prompt(company: str, rivals: list[str], evidence_index: dict, rollups: dict) -> str:
+    rollup_json = json.dumps(rollups, ensure_ascii=False, default=str)[:12000]
+    ledger = _evidence_ledger(evidence_index)
     return f"""{_SENTINEL}
 You are the chief strategist for {company}. Turn the per-competitor intelligence
 rollups below into a board-ready competitive analysis.
 
 COMPETITORS: {', '.join(rivals) if rivals else '(none found)'}
-EVIDENCE_IDS: {', '.join(valid_ids) if valid_ids else '(none)'}
 
 Threat rubric: most markets are MEDIUM; HIGH requires explicit aggressive evidence
 (funding + pricing attack, or a direct feature assault); CRITICAL is existential.
@@ -213,10 +238,16 @@ rollups (only leave one empty if the rollups truly say nothing about it):
   row's "you" is {company}'s stance; "rivals" compares EVERY competitor on that dimension.
 - opportunities: 3-5 concrete, evidence-cited gaps {company} can exploit.
 
-Every opportunity and recommendation MUST cite evidence_ids drawn ONLY from the
-EVIDENCE_IDS list above — citing an id not in that list deletes the item. Maximum 3
-recommendations, each concrete enough to start on Monday. Put confidence at 0.5 as a
-placeholder; the system recomputes the real number and discards yours.
+CITATIONS — every opportunity and recommendation should cite evidence_ids, and you
+may ONLY use ids that appear in the EVIDENCE LEDGER below. Copy the ids EXACTLY
+(e.g. "ev-1a2b3c4d") from the ledger line whose fact supports your point — do not
+invent or guess ids. Any id you cite that is not in the ledger is stripped out, so
+cite the real ones to keep your confidence score up. Maximum 3 recommendations, each
+concrete enough to start on Monday. Put confidence at 0.5 as a placeholder; the system
+recomputes the real number from your citations and discards yours.
+
+EVIDENCE LEDGER (cite these exact ids):
+{ledger}
 
 ROLLUPS (per competitor, JSON):
 {rollup_json}

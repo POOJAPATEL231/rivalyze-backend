@@ -41,7 +41,7 @@ class NewsItem(BaseModel):
 
 class NewsSignals(BaseModel):
     competitor: str
-    items: list[NewsItem] = Field(default_factory=list, max_length=4)
+    items: list[NewsItem] = Field(default_factory=list, max_length=6)
     low_signal: bool = False
 
 
@@ -59,8 +59,8 @@ class ProductIntel(BaseModel):
 # ============================ domain: reviews =============================
 class SentimentIntel(BaseModel):
     competitor: str
-    top_complaints: list[str] = Field(default_factory=list, max_length=3)
-    opportunity_gaps: list[str] = Field(default_factory=list, max_length=3)
+    top_complaints: list[str] = Field(default_factory=list, max_length=5)
+    opportunity_gaps: list[str] = Field(default_factory=list, max_length=5)
     overall_sentiment: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"] = "NEUTRAL"
     sources: list[str] = Field(default_factory=list)
     low_signal: bool = False

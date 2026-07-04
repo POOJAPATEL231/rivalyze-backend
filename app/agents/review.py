@@ -64,9 +64,12 @@ MONTH = datetime.now().strftime("%B %Y")  # e.g. "July 2026"
 # — there is not enough text for an honest extraction.
 LOW_SIGNAL_CORPUS_CHARS = 300
 
-# Cap how much corpus we ship to the LLM. ~5k chars is enough for three
-# complaints and keeps the prompt budget predictable.
-CORPUS_CHAR_CAP = 5000
+# Cap how much corpus we ship to the LLM. ~6.5k chars gives room for up to
+# five complaints across three query angles, keeping the prompt budget bounded.
+CORPUS_CHAR_CAP = 6500
+
+# Max complaints / opportunity-gaps kept per competitor (mirrors SentimentIntel).
+_MAX_ITEMS = 5
 
 # Whitelist of acceptable sentiment values (mirror the Pydantic Literal).
 _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
@@ -90,7 +93,7 @@ _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
 _SYSTEM_PROMPT = """Mine customer complaints about {competitor} from the corpus
 (reviews, Reddit, forums, app stores).
 
-top_complaints: UP TO 3 SHORT plain strings ONLY. Example: "feature overload".
+top_complaints: UP TO 5 SHORT plain strings ONLY. Example: "feature overload".
 WRONG (do not do this): {{"issue": "overload", "severity": "high"}}
 WRONG (do not do this): ["overload", "high"]
 RIGHT: "feature overload"
@@ -155,6 +158,7 @@ def _run_single(
     for query in (
         f"{competitor} customer complaints problems {MONTH}",
         f"{competitor} negative reviews reddit {MONTH}",
+        f"{competitor} app store G2 trustpilot rating review",
     ):
         try:
             hits = search(query, emit)
@@ -215,13 +219,13 @@ def _sanitise(model: SentimentIntel, competitor: str) -> SentimentIntel:
     """
     # Flatten complaints — strip accidental nesting from weak models.
     clean_complaints: list[str] = []
-    for c in (model.top_complaints or [])[:3]:
+    for c in (model.top_complaints or [])[:_MAX_ITEMS]:
         flat = _flatten_complaint(c)
         if flat:
             clean_complaints.append(flat)
 
     clean_gaps: list[str] = []
-    for g in (model.opportunity_gaps or [])[:3]:
+    for g in (model.opportunity_gaps or [])[:_MAX_ITEMS]:
         flat = _flatten_complaint(g)
         if flat:
             clean_gaps.append(flat)

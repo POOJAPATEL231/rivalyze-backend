@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Computed once at import time (not per-call) — "July 2026" stays correct for
 # the whole hackathon; see plan doc gotcha #7.
 _MONTH = datetime.now().strftime("%B %Y")
-_CORPUS_CAP = 5000
+_CORPUS_CAP = 6500
 _LOW_SIGNAL_THRESHOLD = 300
 
 # Bare-JSON system prompt. The "PLAIN STRINGS" + wrong-example line is the
@@ -109,6 +109,9 @@ def _build_corpus(competitor: str, company: str, emit) -> str:
         # only fired when we actually know our own company name.
         queries.append(f"{competitor} vs {company} comparison {_MONTH}")
     queries.append(f"{competitor} new features product update 2026")
+    # Positioning/target-segment angle — feeds the "Market Position" and
+    # "Target Segment" head-to-head rows the strategist now asks for.
+    queries.append(f"{competitor} target market customers positioning")
 
     seen_urls: set[str] = set()
     parts: list[str] = []
