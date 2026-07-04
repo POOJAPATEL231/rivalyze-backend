@@ -50,6 +50,7 @@ Owner: Tushar
 import os
 import logging
 import datetime
+import time
 
 # Module-level logger. Using __name__ means log lines will show up as
 # "app.core.counters" in the log output, so anyone scanning logs during
@@ -76,6 +77,19 @@ logger = logging.getLogger(__name__)
 # a reconnect-with-backoff loop for a scoreboard.
 _redis_client = None
 
+# Negative cache for connection failures. Without this, a SET-BUT-
+# UNREACHABLE REDIS_URL (valid scheme, wrong/down host — a common
+# transient) makes _redis_client stay None forever, so EVERY call re-runs
+# redis.from_url(...).ping() and eats the full socket_timeout (~3s) again.
+# Anything that calls counter_get() in a loop over several providers (e.g.
+# a health/credits endpoint) turns into a multi-second stall per request
+# right when Redis is already degraded — exactly the wrong time for an
+# endpoint to get slow. Caching "we just failed" for a cooldown window
+# turns repeat failures into an instant no-op instead of a fresh network
+# round trip each time.
+_last_connect_failure_at: float | None = None
+_RECONNECT_COOLDOWN_S = 30
+
 
 def _get_client():
     """
@@ -87,12 +101,18 @@ def _get_client():
     unavailable right now" and fall back to returning 0 — they must NOT
     propagate an exception.
     """
-    global _redis_client
+    global _redis_client, _last_connect_failure_at
 
     # Fast path: we already have a working client from a previous call in
     # this process. Reuse it instead of reconnecting.
     if _redis_client is not None:
         return _redis_client
+
+    # Negative-cache fast path: a connection attempt failed recently, so
+    # don't pay another ~3s timeout just to almost certainly fail again.
+    if (_last_connect_failure_at is not None
+            and time.monotonic() - _last_connect_failure_at < _RECONNECT_COOLDOWN_S):
+        return None
 
     url = os.getenv("REDIS_URL")
     if not url:
@@ -137,6 +157,7 @@ def _get_client():
         # immediately (and log once) if the URL/credentials are bad,
         # rather than discovering it silently deep inside counter_incr().
         _redis_client.ping()
+        _last_connect_failure_at = None  # clear the negative cache on a good connection
         return _redis_client
 
     except Exception as e:
@@ -146,12 +167,15 @@ def _get_client():
         # not care WHICH failure it is for control-flow purposes — every
         # single one of them means "treat counters as unavailable" per
         # the golden rule at the top of this file.
-        logger.warning("counters: Redis connection failed (%s) — returning 0", e)
+        logger.warning("counters: Redis connection failed (%s) — returning 0 for %ds", e, _RECONNECT_COOLDOWN_S)
 
         # Leave _redis_client as None (not a broken/half-open client) so
         # that the NEXT call to _get_client() cleanly retries a fresh
-        # connection attempt instead of reusing something broken.
+        # connection attempt instead of reusing something broken. Record
+        # the failure time so THAT retry doesn't happen until the cooldown
+        # elapses (see _last_connect_failure_at above).
         _redis_client = None
+        _last_connect_failure_at = time.monotonic()
         return None
 
 

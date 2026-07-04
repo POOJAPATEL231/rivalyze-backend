@@ -165,8 +165,8 @@ def test_run_one_fails_after_one_retry_and_stops():
 
 # ============================= _budget_exceeded =============================
 @respx.mock
-def test_budget_none_never_checks_health():
-    route = respx.get(f"{BASE}/api/v1/health")
+def test_budget_none_never_checks_credits():
+    route = respx.get(f"{BASE}/api/v1/credits")
     with httpx.Client(base_url=BASE) as client:
         assert warmup._budget_exceeded(client, None) is False
     assert not route.called
@@ -174,23 +174,34 @@ def test_budget_none_never_checks_health():
 
 @respx.mock
 def test_budget_under_limit_is_false():
-    respx.get(f"{BASE}/api/v1/health").mock(return_value=httpx.Response(200, json={"counters": {"tavily": 10}}))
+    respx.get(f"{BASE}/api/v1/credits").mock(return_value=httpx.Response(200, json={"counters": {"tavily": 10}}))
     with httpx.Client(base_url=BASE) as client:
         assert warmup._budget_exceeded(client, 500) is False
 
 
 @respx.mock
 def test_budget_at_or_over_limit_is_true():
-    respx.get(f"{BASE}/api/v1/health").mock(return_value=httpx.Response(200, json={"counters": {"tavily": 500}}))
+    respx.get(f"{BASE}/api/v1/credits").mock(return_value=httpx.Response(200, json={"counters": {"tavily": 500}}))
     with httpx.Client(base_url=BASE) as client:
         assert warmup._budget_exceeded(client, 500) is True
 
 
 @respx.mock
-def test_budget_check_health_error_degrades_to_false():
-    respx.get(f"{BASE}/api/v1/health").mock(return_value=httpx.Response(500))
+def test_budget_check_credits_error_degrades_to_false():
+    respx.get(f"{BASE}/api/v1/credits").mock(return_value=httpx.Response(500))
     with httpx.Client(base_url=BASE) as client:
         assert warmup._budget_exceeded(client, 1) is False
+
+
+@respx.mock
+def test_budget_check_sends_auth_header(monkeypatch):
+    monkeypatch.setenv("BEARER_TOKEN", "s3cret-token")
+    route = respx.get(f"{BASE}/api/v1/credits").mock(
+        return_value=httpx.Response(200, json={"counters": {"tavily": 10}})
+    )
+    with httpx.Client(base_url=BASE) as client:
+        warmup._budget_exceeded(client, 500)
+    assert route.calls.last.request.headers["Authorization"] == "Bearer s3cret-token"
 
 
 # ================================== main ===================================
@@ -235,7 +246,7 @@ def test_main_stops_before_next_company_once_budget_exceeded(tmp_path):
     seed.write_text(json.dumps(["Acme", "Beta"]), encoding="utf-8")
     manifest_path = tmp_path / "manifest.json"
 
-    respx.get(f"{BASE}/api/v1/health").mock(
+    respx.get(f"{BASE}/api/v1/credits").mock(
         side_effect=[
             httpx.Response(200, json={"counters": {"tavily": 10}}),   # checked before Acme: under budget
             httpx.Response(200, json={"counters": {"tavily": 999}}),  # checked before Beta: over budget

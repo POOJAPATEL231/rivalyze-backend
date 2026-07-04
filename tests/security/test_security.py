@@ -50,10 +50,7 @@ def _run_to_completion(job_id, tries=60):
 def test_pos_health_open_and_shaped():
     r = client.get("/api/v1/health")
     assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
-    assert body["service"] == "rivalyze"
-    assert isinstance(body["counters"], dict)
+    assert r.json() == {"status": "ok", "service": "rivalyze"}
 
 
 @requires_db

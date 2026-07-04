@@ -17,7 +17,7 @@ On any failure (network error OR a pipeline outcome other than completed),
 retry the WHOLE company once after a 60s cooldown, then record failed and
 continue. Writes seed/warmup_manifest.json (outcome + duration + lane_stats
 per company). --budget N stops the run before the next company once the
-tavily credit counter (GET /api/v1/health's `counters` field) reaches N.
+tavily credit counter (GET /api/v1/credits, authed) reaches N.
 
 Run (against an already-running server):
   python -m scripts.warmup
@@ -157,13 +157,18 @@ def _run_one(client: httpx.Client, company: str) -> dict:
 
 
 def _budget_exceeded(client: httpx.Client, budget: Optional[int]) -> bool:
-    """True once the tavily credit counter reaches `budget`. A health-check
+    """True once the tavily credit counter reaches `budget`. A credits-check
     hiccup must never abort the whole warm-up run, so any HTTP error here
-    is treated as "not exceeded" rather than raised."""
+    is treated as "not exceeded" rather than raised.
+
+    Reads GET /api/v1/credits (authed), not /health: /health stays open and
+    minimal on purpose — provider usage is gated behind require_token like
+    the rest of the contract, so this call needs the same auth header.
+    """
     if budget is None:
         return False
     try:
-        r = client.get("/api/v1/health")
+        r = client.get("/api/v1/credits", headers=_headers())
         r.raise_for_status()
         tavily = r.json().get("counters", {}).get("tavily", 0)
         return tavily >= budget

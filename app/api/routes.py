@@ -6,7 +6,8 @@ Two-phase pipeline (Rivalyze_TwoPhase_Pipeline.md):
   POST /api/v1/runs/{id}/confirm  (auth) -> {job_id, status:"confirmed"} — the "Deploy the agents" button
   GET  /api/v1/reports/{run_id}   (auth) -> the full CompetitiveReport
   GET  /api/v1/evidence/{ref}     (auth) -> {claim_ref, sources[]} — the citation drawer
-  GET  /api/v1/health             (open) -> {status:"ok", service:"rivalyze", counters:{...}}
+  GET  /api/v1/health             (open) -> {status:"ok", service:"rivalyze"}
+  GET  /api/v1/credits            (auth) -> {counters:{...}} — per-provider daily usage
 
 GET /history and GET /reports/{id}/export live in app/api/history_routes.py
 (Dharvi's router), registered alongside this one in main.py.
@@ -32,11 +33,11 @@ from ..models import (
 
 router = APIRouter(prefix="/api/v1")
 
-# health's `counters` field (added for Dharvi's warmup --budget flag, Module
-# 4) reports today's call count for every provider budgets.json tracks.
-# Loaded once at import (same "read once" convention as core/config.py); a
+# /credits' provider list (added for Dharvi's warmup --budget flag, Module
+# 4) — today's call count for every provider budgets.json tracks. Loaded
+# once at import (same "read once" convention as core/config.py); a
 # missing/malformed file degrades to an empty provider list rather than
-# crashing /health, which must never break.
+# crashing the endpoint.
 _BUDGETS_PATH = Path(__file__).resolve().parents[2] / "budgets.json"
 try:
     _BUDGET_PROVIDERS = list(json.loads(_BUDGETS_PATH.read_text(encoding="utf-8")))
@@ -105,5 +106,17 @@ def get_evidence_endpoint(claim_ref: str, run_id: str = Query(...)) -> EvidenceR
 
 @router.get("/health")
 def health() -> dict:
+    return {"status": "ok", "service": "rivalyze"}
+
+
+@router.get("/credits", dependencies=[Depends(require_token)])
+def credits() -> dict:
+    """Per-provider daily call counts (app/core/counters.py), for Module 4's
+    --budget flag. Deliberately NOT on /health: /health is open (LB/QA
+    probes) and must stay minimal — an anonymous caller reading the full
+    provider stack + today's usage is an information disclosure (it also
+    tells an attacker how close a provider is to its quota). Gated behind
+    the same require_token as the rest of the contract instead.
+    """
     counters = {p: counter_get(today_key(p)) for p in _BUDGET_PROVIDERS}
-    return {"status": "ok", "service": "rivalyze", "counters": counters}
+    return {"counters": counters}
