@@ -34,11 +34,27 @@ import logging
 from datetime import datetime
 from typing import Callable, Literal
 
+from pydantic import BaseModel, Field
+
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.models import SentimentIntel
 
 logger = logging.getLogger(__name__)
+
+
+class _SentimentExtraction(BaseModel):
+    """Lenient extraction schema — no 3-item caps and a plain-str sentiment, so a
+    model returning 4 complaints or "Positive"/"MIXED" validates and gets fixed up
+    in _sanitise (truncate to 3, coerce the enum), instead of failing validation
+    on every lane (SentimentIntel caps at 3 + a strict Literal) and degrading the
+    competitor to low_signal."""
+    competitor: str = ""
+    top_complaints: list[str] = Field(default_factory=list)
+    opportunity_gaps: list[str] = Field(default_factory=list)
+    overall_sentiment: str = "NEUTRAL"
+    sources: list[str] = Field(default_factory=list)
+    low_signal: bool = False
 
 # Refresh the month label each import so a long-running process still uses
 # the current month in its search queries.
@@ -162,7 +178,7 @@ def _run_single(
         + f"\n\nCORPUS:\n{corpus}"
     )
     try:
-        model_instance, _lane = complete("extract", prompt, SentimentIntel, emit)
+        model_instance, _lane = complete("extract", prompt, _SentimentExtraction, emit)
     except Exception as exc:
         # All lanes exhausted, JSON-repair failed, schema mismatch, etc.
         # The plan says callers convert this to low_signal.

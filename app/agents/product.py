@@ -60,7 +60,15 @@ def run(competitors: list, emit, company: str = "") -> list[dict]:
     results = []
     for item in competitors:
         name = item if isinstance(item, str) else item.get("name", str(item))
-        intel = _process(name, company, emit)
+        try:
+            intel = _process(name, company, emit)
+        except Exception as e:
+            # Per-competitor guard: a search-chain crash or any unexpected error
+            # for ONE rival degrades only that rival to low_signal — it never
+            # raises out of run() and never drops the rest of the batch.
+            logger.warning("product: unhandled error for %s: %s", name, e)
+            emit("product", f"low signal: {name} · {type(e).__name__}")
+            intel = _low_signal(name)
         results.append(intel.model_dump())
     return results
 

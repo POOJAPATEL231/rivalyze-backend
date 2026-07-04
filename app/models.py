@@ -235,6 +235,36 @@ class HistoryEntry(BaseModel):
     created_at: datetime
 
 
+class DeltaSignal(BaseModel):
+    """One NEW signal in GET /api/v1/companies/{slug}/delta.
+
+    `type` is a plain str (not the Signal Literal) on purpose: a historical row
+    with an unexpected type must never 500 a pure read endpoint."""
+
+    agent: str
+    competitor: str
+    type: str
+    headline: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str  # f"{type}:{competitor.lower()}" — matches evidence claim_ref shape
+
+
+class DeltaResponse(BaseModel):
+    """GET /api/v1/companies/{slug}/delta — "what's new since last run".
+
+    Two 200 variants (route uses response_model_exclude_none so absent
+    optionals are dropped from the JSON):
+      - has a previous run: company + since + count + new_signals
+      - first/only run:     count=0, new_signals=[], first_run=true
+    """
+
+    count: int
+    new_signals: list[DeltaSignal] = Field(default_factory=list)
+    company: Optional[str] = None      # only when a previous run exists
+    since: Optional[datetime] = None   # previous run's finished_at (ISO 8601)
+    first_run: Optional[bool] = None   # true only for the 0-or-1-run case
+
+
 # ============================== auth (users) ==============================
 def _within_bcrypt_limit(password: str) -> str:
     # bcrypt only considers the first 72 BYTES; reject longer so no silent
