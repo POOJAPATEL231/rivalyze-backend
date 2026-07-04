@@ -1,9 +1,13 @@
 """Concentric discovery (flag-gated): grounds the company location, then searches
 rivals in expanding radius (city -> region -> country -> global), widening only when
 a tier is thin. Flag OFF = today's flat discovery, unchanged."""
-from app.agents import discovery
-from app.core import config
-from app.models import CompanyProfile, GeoLocation
+import os
+
+os.environ.setdefault("MOCK_MODE", "1")   # MUST precede app imports (MOCK is frozen at import)
+
+from app.agents import discovery  # noqa: E402
+from app.core import config  # noqa: E402
+from app.models import CompanyProfile, GeoLocation  # noqa: E402
 
 
 def _noop(a, m):
@@ -29,10 +33,11 @@ def test_resolve_profile_grounds_location():
 
 
 def test_concentric_corpus_stops_widening_when_enough(monkeypatch):
-    # city=1, region=1, country=5 -> accumulates to 7 by country -> STOP before global
+    # city=1, region=1, country=5 -> accumulates to 7 by country -> STOP before global.
+    # content is substantial so the corpus clears the extraction threshold too.
     def fake_search(q, emit):
         n = 5 if "India" in q else 1
-        return [{"title": "t", "content": "c", "url": f"http://x/{hash(q)}/{i}"} for i in range(n)]
+        return [{"title": "t", "content": "x" * 100, "url": f"http://x/{hash(q)}/{i}"} for i in range(n)]
     monkeypatch.setattr(discovery.search_mod, "search", fake_search)
     monkeypatch.setattr(config, "CONCENTRIC_MIN_RESULTS", 4)
     prof = CompanyProfile(name="Acme",
@@ -104,3 +109,31 @@ def test_min_corpus_guard_applies_in_concentric(monkeypatch):
     monkeypatch.setattr(discovery.search_mod, "search", lambda q, e: [])
     out = discovery.run("Acme", "widgets", "t", _noop)
     assert out.competitors == []
+
+
+def test_resolve_profile_clamps_long_model_fields(monkeypatch):
+    # a rambling size string (>60) must NOT throw away the grounded location
+    monkeypatch.setattr(discovery.search_mod, "search",
+                        lambda q, e: [{"title": "t", "content": "x" * 400, "url": "http://x"}])
+
+    class _P:
+        city, region, country = "Bengaluru", "Karnataka", "India"
+        size = "approximately 1,000-1,500 employees across offices in Bengaluru, Mumbai and Delhi"
+    monkeypatch.setattr(discovery.llm_router, "complete", lambda *a, **k: (_P(), "mock"))
+    p = discovery._resolve_profile("Acme", "widgets", "July 2026", _noop)
+    assert p.location.city == "Bengaluru"          # location KEPT (not discarded by the long size)
+    assert len(p.size) <= 60                        # clamped, still valid
+
+
+def test_concentric_widens_when_count_met_but_text_thin(monkeypatch):
+    # city tier hits the result COUNT (5 >= 4) but its text is empty -> must NOT stop; keep widening
+    seen = []
+
+    def fake(q, e):
+        seen.append(q)
+        return [{"title": "", "content": "", "url": f"http://x/{len(seen)}/{i}"} for i in range(5)]
+    monkeypatch.setattr(discovery.search_mod, "search", fake)
+    monkeypatch.setattr(config, "CONCENTRIC_MIN_RESULTS", 4)
+    prof = CompanyProfile(name="Acme", location=GeoLocation(city="A", region="B", country="C"))
+    discovery._concentric_corpus("Acme", "w", prof, "July 2026", _noop)
+    assert any(" in B " in f" {q} " for q in seen)  # region reached despite city hitting the count

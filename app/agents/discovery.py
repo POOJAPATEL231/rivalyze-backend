@@ -146,6 +146,9 @@ def _resolve_profile(company: str, domain: str, month: str, emit) -> CompanyProf
     """Ground the company's location + size from search — NEVER invent. A level we
     can't ground stays blank, and a blank level just means we start the concentric
     radius wider (region/country) instead of a wrong city. Never raises."""
+    # Bound name/category to the CompanyProfile caps so building the profile (incl. the
+    # fallbacks below) can never itself raise on a pathologically long input.
+    name, cat = company[:200], (domain or "")[:200]
     try:
         corpus = ""
         for q in (f"{company} {domain} headquarters city country".strip(),
@@ -155,16 +158,20 @@ def _resolve_profile(company: str, domain: str, month: str, emit) -> CompanyProf
         corpus = corpus[:3500]
         if len(corpus.strip()) < _LOW_SIGNAL_THRESHOLD:
             emit("discovery", "profile: thin corpus · location unresolved (searching wide)")
-            return CompanyProfile(name=company, category=domain)
+            return CompanyProfile(name=name, category=cat)
         p, lane = llm_router.complete("extract", _profile_prompt(company, domain, corpus),
                                       _ProfileExtraction, emit)
-        loc = GeoLocation(city=p.city.strip(), region=p.region.strip(), country=p.country.strip())
+        # Clamp each field to its model cap BEFORE constructing — a long model value
+        # (e.g. a rambling size string) must not raise and throw away a good location.
+        loc = GeoLocation(city=p.city.strip()[:120], region=p.region.strip()[:120],
+                          country=p.country.strip()[:120])
+        size = p.size.strip()[:60]
         emit("discovery", f"profile via {lane}: {loc.city or '-'} / {loc.region or '-'} / "
-                          f"{loc.country or '-'} · size {p.size.strip() or '-'}")
-        return CompanyProfile(name=company, location=loc, size=p.size.strip(), category=domain)
+                          f"{loc.country or '-'} · size {size or '-'}")
+        return CompanyProfile(name=name, location=loc, size=size, category=cat)
     except Exception as exc:  # noqa: BLE001 — discovery never raises; degrade to no-location
         emit("discovery", f"profile unresolved ({type(exc).__name__}) · searching wide")
-        return CompanyProfile(name=company, category=domain)
+        return CompanyProfile(name=name, category=cat)
 
 
 def _profile_prompt(company: str, domain: str, corpus: str) -> str:
@@ -216,9 +223,12 @@ def _concentric_corpus(company: str, domain: str, profile: CompanyProfile, month
             corpus += f"{tag} {title}\n{content}\nSOURCE: {url}\n\n"
             distinct += 1
         emit("discovery", f"radius '{tier_type}' · {distinct} distinct results so far")
-        # Stop widening once we have enough; the global tier is last anyway, so a
-        # still-thin run falls through to it naturally.
-        if tier_type != "global" and distinct >= config.CONCENTRIC_MIN_RESULTS:
+        # Stop widening only when we have enough results AND enough actual text to
+        # extract from — otherwise a tier of title-only / url-less snippets could hit
+        # the count but leave the corpus below the extraction threshold. Global is last
+        # anyway, so a still-thin run falls through to it naturally.
+        if (tier_type != "global" and distinct >= config.CONCENTRIC_MIN_RESULTS
+                and len(corpus.strip()) >= _LOW_SIGNAL_THRESHOLD):
             break
     return corpus[:config.CORPUS_CAP]
 
