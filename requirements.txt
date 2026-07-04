@@ -21,6 +21,7 @@ pytest>=8.0
 pytest-asyncio>=0.23
 fakeredis>=2.21
 
+langgraph>=1.2.7,<2       # orchestrator pipeline (LangGraph 1.x, verified line)
 python-dotenv>=1.0        # optional: loads .env at startup
 pyjwt>=2.8                # JWT sign/verify (HS256)
 bcrypt>=4.1              # password hashing (salted, slow)
