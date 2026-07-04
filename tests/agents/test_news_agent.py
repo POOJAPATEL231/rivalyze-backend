@@ -3,10 +3,7 @@ degradation ladder (thin corpus, zero survivors, lane exhaustion), the item cap,
 dedupe, and query shape."""
 from datetime import datetime
 
-import pytest
-
 from app.agents import news
-from app.models import NewsItem
 
 
 def collector():
