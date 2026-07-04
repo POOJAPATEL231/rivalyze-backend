@@ -21,6 +21,7 @@ from datetime import datetime
 from fastapi import BackgroundTasks
 
 from ..agents import discovery
+from ..core import config
 from ..core import confidence as confidence_mod
 from ..core import llm_router  # noqa: F401  (imported so MOCK env is resolved eagerly)
 from ..core import merge as merge_mod
@@ -236,6 +237,13 @@ def start_analysis(job_id: str, run_id: str, confirmed: list[dict]) -> None:
     # report-bearing run to "failed" — which would strand the UI away from a report
     # that is sitting in the DB. So it runs outside the try above and is swallowed.
     try:
+        # Optional report-quality scoring (adopted from rivalyze-dev). Best-effort,
+        # OFF by default (one extra LLM call); the score rides in lane_stats.
+        if config.REPORT_EVAL:
+            from ..core import report_eval
+            scores = report_eval.evaluate(report_dict, company, emit)
+            if scores:
+                lane_stats["report_score"] = scores["overall_score"]
         _persist_lane_stats(job_id, lane_stats)
         emit("system", f"report ready · completed in {time.time() - t0:.1f}s")
     except Exception:  # noqa: BLE001 — cosmetic; the run is already completed

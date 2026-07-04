@@ -76,6 +76,13 @@ SEARCH_MAX_RESULTS: int = _int_env("SEARCH_MAX_RESULTS", 6 if RICH_SEARCH else 3
 SEARCH_DEPTH: str = os.getenv("SEARCH_DEPTH", "advanced" if RICH_SEARCH else "basic")
 CORPUS_CAP: int = _int_env("CORPUS_CAP", 12000 if RICH_SEARCH else 6500)
 
+# --- report quality scoring (OFF by default; adopted from rivalyze-dev) ---
+# When on, an LLM-as-judge scores each finished report (completeness / accuracy /
+# strategic-value / actionability, 1-10) and the run exposes report_score. Costs one
+# extra LLM call per run, so keep off while quota is tight. Best-effort: never blocks
+# or fails a run.
+REPORT_EVAL: bool = _flag("REPORT_EVAL")
+
 # --- JWT user auth ---
 # Secret MUST come from the environment in any shared/deployed run. When it is
 # absent (local/MOCK dev) we mint a random per-process secret so tokens are

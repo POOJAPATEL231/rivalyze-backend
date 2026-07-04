@@ -162,6 +162,10 @@ def _mock_completion(prompt: str) -> str:
                  "confidence": 0.5, "evidence_ids": cite, "claim_ref": "rec:bundle-ai"}],
             "low_signal_findings": [],
             "analysis_date": "2026-01-01"})
+    if "STRICT evaluator" in prompt:
+        # report_eval scoring (reason lane) — return plausible scores offline.
+        return json.dumps({"completeness": 8, "accuracy": 7, "strategic_value": 8,
+                           "actionability": 7, "overall_score": 7.5})
     if "competitors" in prompt.lower():
         company = "the company"
         m = re.search(r"competitors of (.+?) in", prompt)
