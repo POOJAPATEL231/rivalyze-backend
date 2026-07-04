@@ -23,3 +23,14 @@ def test_health_cache_shape_and_no_secret_leak():
 def test_health_cache_is_open_no_auth_required():
     # ops must be able to hit it without a token, same as /health
     assert client.get("/api/v1/health/cache").status_code == 200
+
+
+def test_health_evidence_shape_and_verdict():
+    r = client.get("/api/v1/health/evidence")
+    assert r.status_code == 200
+    body = r.json()
+    assert "postgres" in body and "verdict" in body
+    assert body["verdict"] in {
+        "in_memory_only", "table_missing", "table_empty", "persisting", "db_error",
+    }
+

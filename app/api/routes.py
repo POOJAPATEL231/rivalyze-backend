@@ -155,3 +155,47 @@ def health_cache() -> dict:
     out["verdict"] = verdict
     out["cache_working"] = redis_ok or pg_ok
     return out
+
+
+@router.get("/health/evidence")
+def health_evidence() -> dict:
+    """Live evidence-PERSISTENCE diagnostic. The report shows citations from an
+    in-request index, but the citation drawer (GET /evidence/{claim_ref}) reads from
+    Postgres — and merge writes evidence BEST-EFFORT (it swallows failures). So a
+    missing `evidence` table, or a run_id that isn't a valid uuid in `runs` (FK
+    violation), makes evidence silently NOT persist while the report still looks
+    cited. This reports the truth from inside the deployment. Never raises."""
+    import os
+
+    out: dict = {"postgres": {"configured": bool(os.getenv("DATABASE_URL") or os.getenv("PGHOST"))}}
+    if not out["postgres"]["configured"]:
+        # No Postgres -> evidence lives only in the in-memory store: the drawer
+        # works within a single process but nothing survives a restart.
+        out["verdict"] = "in_memory_only"
+        out["note"] = "No DATABASE_URL/PGHOST — evidence is in-memory only (fine locally, lost on restart)."
+        return out
+
+    try:
+        with repository.get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.evidence')")
+                table = cur.fetchone()[0] is not None
+                out["postgres"]["evidence_table"] = table
+                if table:
+                    cur.execute("SELECT count(*) FROM evidence")
+                    out["postgres"]["evidence_rows"] = cur.fetchone()[0]
+    except Exception as exc:  # noqa: BLE001
+        out["postgres"]["error"] = type(exc).__name__
+        out["verdict"] = "db_error"
+        return out
+
+    table = out["postgres"].get("evidence_table")
+    rows = out["postgres"].get("evidence_rows", 0)
+    if not table:
+        out["verdict"] = "table_missing"   # drawer will ALWAYS be empty — run app/db/schema.sql
+    elif rows == 0:
+        out["verdict"] = "table_empty"     # no evidence persisted yet: either no completed runs, or writes silently failing
+    else:
+        out["verdict"] = "persisting"      # evidence IS being written -> the citation drawer works
+    out["drawer_working"] = out["verdict"] == "persisting"
+    return out
