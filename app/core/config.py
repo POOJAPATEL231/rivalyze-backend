@@ -65,6 +65,17 @@ REDIS_URL: str = os.getenv("REDIS_URL", "")
 COMPETITOR_INTEL_CACHE: bool = _flag("COMPETITOR_INTEL_CACHE")   # default 0 (off)
 COMPETITOR_INTEL_TTL: int = _int_env("COMPETITOR_INTEL_TTL", 86400)  # 24h
 
+# --- richer search (OFF by default) ---
+# When on, agents fetch MORE results per query, pull richer per-result content
+# (Tavily 'advanced' depth), and feed a LARGER corpus to the LLM — deeper, better
+# grounded reports. Trade-off: more INPUT tokens per call, so only enable with quota
+# headroom (more API keys / a live Gemini), else it accelerates rate-limiting.
+# Each value is independently overridable so you can tune without flipping everything.
+RICH_SEARCH: bool = _flag("RICH_SEARCH")
+SEARCH_MAX_RESULTS: int = _int_env("SEARCH_MAX_RESULTS", 6 if RICH_SEARCH else 3)
+SEARCH_DEPTH: str = os.getenv("SEARCH_DEPTH", "advanced" if RICH_SEARCH else "basic")
+CORPUS_CAP: int = _int_env("CORPUS_CAP", 12000 if RICH_SEARCH else 6500)
+
 # --- JWT user auth ---
 # Secret MUST come from the environment in any shared/deployed run. When it is
 # absent (local/MOCK dev) we mint a random per-process secret so tokens are

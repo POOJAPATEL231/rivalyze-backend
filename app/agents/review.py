@@ -36,6 +36,7 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
+from app.core import config
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.core.grounding import ground_sources
@@ -65,9 +66,8 @@ MONTH = datetime.now().strftime("%B %Y")  # e.g. "July 2026"
 # — there is not enough text for an honest extraction.
 LOW_SIGNAL_CORPUS_CHARS = 300
 
-# Cap how much corpus we ship to the LLM. ~6.5k chars gives room for up to
-# five complaints across three query angles, keeping the prompt budget bounded.
-CORPUS_CHAR_CAP = 6500
+# Cap how much corpus we ship to the LLM (6.5k default, 12k under RICH_SEARCH).
+CORPUS_CHAR_CAP = config.CORPUS_CAP
 
 # Max complaints / opportunity-gaps kept per competitor (mirrors SentimentIntel).
 # The report keeps them all; the frontend truncates for display. This is a DoS

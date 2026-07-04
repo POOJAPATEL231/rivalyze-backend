@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from app.core import config
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.core.grounding import ground_sources
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Computed once at import time (not per-call) — "July 2026" stays correct for
 # the whole hackathon; see plan doc gotcha #7.
 _MONTH = datetime.now().strftime("%B %Y")
-_CORPUS_CAP = 6500
+_CORPUS_CAP = config.CORPUS_CAP    # 6500, or 12000 under RICH_SEARCH
 _LOW_SIGNAL_THRESHOLD = 300
 
 # Bare-JSON system prompt. The "PLAIN STRINGS" + wrong-example line is the

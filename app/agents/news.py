@@ -16,6 +16,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.core import config
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.models import NewsItem, NewsSignals
@@ -23,7 +24,7 @@ from app.models import NewsItem, NewsSignals
 logger = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_CORPUS_CAP = 6500
+_CORPUS_CAP = config.CORPUS_CAP    # 6500, or 12000 under RICH_SEARCH
 _LOW_SIGNAL_THRESHOLD = 300
 # Report keeps all grounded events; frontend shows the top few. Bound only as a
 # DoS ceiling on model output (must stay <= NewsSignals.items max_length).

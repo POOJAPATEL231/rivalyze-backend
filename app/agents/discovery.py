@@ -14,6 +14,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ..models import Competitor, CompetitorSet
+from ..core import config
 from ..core import search_chain as search_mod
 from ..core import llm_router
 
@@ -91,7 +92,7 @@ def _build_corpus(company: str, domain: str, month: str, emit) -> str:
             title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
             corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
 
-    return corpus[:6000]  # prompt budget cap (v2 §4.6)
+    return corpus[:config.CORPUS_CAP]  # prompt budget cap (6000 default, 12000 under RICH_SEARCH)
 
 
 def _build_prompt(company: str, domain: str, corpus: str) -> str:
