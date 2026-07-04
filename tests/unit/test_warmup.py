@@ -30,21 +30,80 @@ def _run_status(status: str, **overrides) -> dict:
 
 # ================================== _poll ==================================
 @respx.mock
-def test_poll_returns_immediately_when_completed():
+def test_poll_returns_immediately_when_wanted_status_seen():
     respx.get(f"{BASE}/api/v1/runs/job-1").mock(return_value=httpx.Response(200, json=_run_status("completed")))
     with httpx.Client(base_url=BASE) as client:
-        result = warmup._poll(client, "job-1")
+        result = warmup._poll(client, "job-1", {"completed", "failed"})
     assert result["status"] == "completed"
 
 
 @respx.mock
-def test_poll_times_out_when_never_completes(monkeypatch):
+def test_poll_times_out_when_wanted_status_never_seen(monkeypatch):
     monkeypatch.setattr(warmup, "POLL_TIMEOUT_S", 0.02)
-    respx.get(f"{BASE}/api/v1/runs/job-1").mock(return_value=httpx.Response(200, json=_run_status("running")))
+    respx.get(f"{BASE}/api/v1/runs/job-1").mock(return_value=httpx.Response(200, json=_run_status("running_discovery")))
     with httpx.Client(base_url=BASE) as client:
-        result = warmup._poll(client, "job-1")
+        result = warmup._poll(client, "job-1", {"awaiting_confirmation", "completed", "failed"})
     assert result["status"] == "failed"
     assert "timeout" in result["error"]
+
+
+# ============================= _drive_two_phase =============================
+@respx.mock
+def test_drive_two_phase_confirms_when_awaiting_and_completes():
+    competitors = [{"name": "Coda", "category": "direct", "rationale": "docs+db"}]
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        return_value=httpx.Response(200, json={"job_id": "job-1", "status": "running_discovery"})
+    )
+    respx.get(f"{BASE}/api/v1/runs/job-1").mock(
+        side_effect=[
+            httpx.Response(200, json=_run_status("awaiting_confirmation", result={"competitors": competitors})),
+            httpx.Response(200, json=_run_status("completed")),
+        ]
+    )
+    confirm_route = respx.post(f"{BASE}/api/v1/runs/job-1/confirm").mock(
+        return_value=httpx.Response(202, json={"job_id": "job-1", "status": "confirmed"})
+    )
+
+    with httpx.Client(base_url=BASE) as client:
+        result = warmup._drive_two_phase(client, "Acme")
+
+    assert result["status"] == "completed"
+    assert confirm_route.called
+    assert json.loads(confirm_route.calls.last.request.content) == {"confirmed_competitors": competitors}
+
+
+@respx.mock
+def test_drive_two_phase_completes_without_confirm_on_persistence_hit():
+    # persistence-first: /analyze itself can return completed directly.
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        return_value=httpx.Response(200, json={"job_id": "job-1", "status": "completed"})
+    )
+    respx.get(f"{BASE}/api/v1/runs/job-1").mock(return_value=httpx.Response(200, json=_run_status("completed")))
+    confirm_route = respx.post(f"{BASE}/api/v1/runs/job-1/confirm")
+
+    with httpx.Client(base_url=BASE) as client:
+        result = warmup._drive_two_phase(client, "Acme")
+
+    assert result["status"] == "completed"
+    assert not confirm_route.called
+
+
+@respx.mock
+def test_drive_two_phase_no_competitors_proposed_is_failed_without_confirming():
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        return_value=httpx.Response(200, json={"job_id": "job-1", "status": "running_discovery"})
+    )
+    respx.get(f"{BASE}/api/v1/runs/job-1").mock(
+        return_value=httpx.Response(200, json=_run_status("awaiting_confirmation", result={"competitors": []}))
+    )
+    confirm_route = respx.post(f"{BASE}/api/v1/runs/job-1/confirm")
+
+    with httpx.Client(base_url=BASE) as client:
+        result = warmup._drive_two_phase(client, "Acme")
+
+    assert result["status"] == "failed"
+    assert "no competitors" in result["error"]
+    assert not confirm_route.called
 
 
 # ================================ _run_one =================================
