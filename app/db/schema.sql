@@ -11,6 +11,32 @@ CREATE TABLE IF NOT EXISTS companies (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_companies_lower_name ON companies (lower(name));
 
+-- Auth users (added for the login/signup feature). Owner remains Dharvi (schema).
+-- password_hash is a bcrypt hash — plaintext passwords NEVER touch this table.
+CREATE TABLE IF NOT EXISTS users (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email         text NOT NULL,
+  password_hash text NOT NULL,                     -- bcrypt; never plaintext
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+-- case-insensitive uniqueness: one account per email regardless of casing
+CREATE UNIQUE INDEX IF NOT EXISTS ix_users_lower_email ON users (lower(email));
+
+-- Long-lived refresh tokens (rotation + revocation). token_hash is a SHA-256
+-- of a high-entropy random token — the raw token is NEVER stored, only its
+-- hash, so a DB leak cannot be replayed. Access tokens (JWT) are stateless and
+-- live in NO table; only refresh tokens are persisted, because they must be
+-- revocable (logout, rotation, theft detection).
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash  text NOT NULL UNIQUE,               -- sha256(raw token), never the raw value
+  expires_at  timestamptz NOT NULL,
+  revoked     boolean NOT NULL DEFAULT false,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_refresh_user ON refresh_tokens (user_id);
+
 CREATE TABLE IF NOT EXISTS runs (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id             text NOT NULL UNIQUE,          -- "rivalyze-notion-a1b2c3"
