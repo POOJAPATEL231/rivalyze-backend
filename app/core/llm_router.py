@@ -111,6 +111,45 @@ def _mock_completion(prompt: str) -> str:
     and checking review's output has low_signal=False with real-looking
     complaints/opportunity_gaps instead of empty lists.
     """
+    if "RIVALYZE_STRATEGIST" in prompt:
+        # Strategist (reason lane). Must be sniffed BEFORE the discovery branch —
+        # this prompt also contains the word "competitors". Parse the rival names
+        # and the real EVIDENCE_IDS out of the prompt so the mock cites ids that
+        # actually exist (strategist.py drops recs citing unknown ids); the report
+        # then survives the validate node and confidence is code-recomputed.
+        m = re.search(r"COMPETITORS:\s*(.+)", prompt)
+        rivals = [r.strip() for r in m.group(1).split(",")] if m else []
+        rivals = [r for r in rivals if r and "none" not in r.lower()]
+        m = re.search(r"EVIDENCE_IDS:\s*(.+)", prompt)
+        ids = [i.strip() for i in m.group(1).split(",")] if m else []
+        cite = [i for i in ids if i.startswith("ev-")][:1]
+        first = rivals[0] if rivals else "the leading rival"
+        return json.dumps({
+            "company": "mock",
+            "threat_level": "MEDIUM",
+            "executive_summary": (
+                f"Mock analysis: {first} and peers compete on price and feature depth. "
+                "The clearest opening is a lighter, lower-priced tier for smaller teams."),
+            "swot": {
+                "strengths": ["recognized brand (mock)"],
+                "weaknesses": ["feature bloat (mock)"],
+                "opportunities": ["simpler onboarding (mock)"],
+                "threats": ["aggressive rival pricing (mock)"]},
+            "sentiment": {r: {"score": 0.5, "label": "NEUTRAL"} for r in rivals},
+            "head_to_head": ([{
+                "metric": "Pricing",
+                "you": "Competitive entry price",
+                "rivals": {r: {"value": "$12/seat (mock)"} for r in rivals}}]
+                if rivals else []),
+            "opportunities": [
+                {"text": "Ship a lightweight no-AI tier (mock)",
+                 "evidence_ids": cite, "claim_ref": "opp:lite-tier"}],
+            "recommendations": [
+                {"action": "Bundle AI into the base plan (mock)",
+                 "rationale": "Neutralizes the rival pricing edge (mock)",
+                 "confidence": 0.5, "evidence_ids": cite, "claim_ref": "rec:bundle-ai"}],
+            "low_signal_findings": [],
+            "analysis_date": "2026-01-01"})
     if "competitors" in prompt.lower():
         company = "the company"
         m = re.search(r"competitors of (.+?) in", prompt)
@@ -136,6 +175,24 @@ def _mock_completion(prompt: str) -> str:
             "advantages": ["cheaper at small team size (mock)"],
             "sources": ["https://example.com/mock-source"],
         })
+    if "source_url" in prompt:
+        # News extraction (_NewsExtraction: {"items": [NewsItem]}).
+        # news.py's _post_filter keeps an item ONLY if its source_url appears
+        # verbatim on a SOURCE: line in the corpus, so pull the real URLs out of the
+        # prompt's corpus instead of inventing them — an invented URL gets stripped
+        # by the grounding filter and the demo shows zero events. No SOURCE lines in
+        # the corpus -> items:[] -> the competitor degrades to low_signal, as in
+        # real mode.
+        urls = re.findall(r"SOURCE:\s*(https?://\S+)", prompt)[:2]
+        events = [
+            ("Shipped an AI feature update (mock)",
+             "Raises the AI bar for competing products (mock)", "2026-07-01"),
+            ("Raised a new funding round (mock)",
+             "War chest for pricing and go-to-market pressure (mock)", ""),
+        ]
+        return json.dumps({"items": [
+            {"event": event, "impact": impact, "source_url": url, "date": date}
+            for url, (event, impact, date) in zip(urls, events)]})
     if "top_complaints" in prompt:
         # "competitor" is required by SentimentIntel even though review.py's
         # _sanitise() re-stamps it with the caller's known-good name after

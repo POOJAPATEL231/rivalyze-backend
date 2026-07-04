@@ -307,9 +307,11 @@ def _resolve_idea(state: dict, emit: EmitFn) -> dict:
 
 
 def run_pipeline(state: dict, agents: Mapping[str, NodeFn], emit: EmitFn) -> dict:
-    """The lifecycle entry point. Never raises: any failure in the idea pre-step,
-    graph build, or graph run degrades to a state dict with report=None plus a
-    typed finding, so the run finishes and the poller never sees an error."""
+    """The (single-pass) lifecycle entry point. Never raises: any failure in the
+    idea pre-step, graph build, or graph run degrades to a state dict with
+    report=None plus a typed finding, so the run finishes and the poller never
+    sees an error. Retained for the one-shot path; the two-phase flow uses
+    run_discovery / run_analysis below."""
     state = dict(state)
     try:
         if state.get("idea") and not state.get("company"):
@@ -320,4 +322,75 @@ def run_pipeline(state: dict, agents: Mapping[str, NodeFn], emit: EmitFn) -> dic
         emit("system", f"pipeline degraded at the outer boundary: {type(exc).__name__}: {exc}")
         findings = list(state.get("low_signal_findings", []))
         findings.append(f"pipeline: {type(exc).__name__} at the outer boundary — degraded run")
+        return {**state, "report": None, "low_signal_findings": findings}
+
+
+# ============================ two-phase graphs ============================
+# The two-phase flow (Rivalyze_TwoPhase_Pipeline.md) compiles TWO graphs over the
+# SAME PipelineState, split at the human-approval gate. Phase 1 runs discovery only
+# and parks at awaiting_confirmation; Phase 2 fans out the gathering agents on the
+# user-confirmed competitor list. Both reuse the identical _boundary / _validate_node
+# / adapter machinery above — only the edge topology differs.
+
+_ANALYSIS_AGENTS = ("news", "product", "review", "merge", "strategist")
+
+
+def build_discovery_graph(agents: Mapping[str, NodeFn], emit: EmitFn) -> "CompiledStateGraph":
+    """Phase 1: START -> discovery -> END. Requires only the 'discovery' agent."""
+    if "discovery" not in agents:
+        raise ValueError("agents mapping missing required key: discovery")
+    builder = StateGraph(PipelineState)
+    builder.add_node("discovery", _boundary("discovery", agents["discovery"], emit))
+    builder.add_edge(START, "discovery")
+    builder.add_edge("discovery", END)
+    return builder.compile()
+
+
+def build_analysis_graph(agents: Mapping[str, NodeFn], emit: EmitFn) -> "CompiledStateGraph":
+    """Phase 2: START -> [news | product | review] -> merge -> strategist -> validate
+    -> END. No discovery node — the confirmed competitors are seeded into state."""
+    missing = sorted(set(_ANALYSIS_AGENTS) - set(agents))
+    if missing:
+        raise ValueError(f"agents mapping missing required keys: {', '.join(missing)}")
+    builder = StateGraph(PipelineState)
+    for node in _ANALYSIS_AGENTS:
+        builder.add_node(node, _boundary(node, agents[node], emit))
+    builder.add_node("validate", _validate_node(agents["strategist"], emit))
+    for branch in GATHER_NODES:
+        builder.add_edge(START, branch)
+    builder.add_edge(list(GATHER_NODES), "merge")
+    builder.add_edge("merge", "strategist")
+    builder.add_edge("strategist", "validate")
+    builder.add_edge("validate", END)
+    return builder.compile()
+
+
+def run_discovery(state: dict, agents: Mapping[str, NodeFn], emit: EmitFn) -> dict:
+    """Phase 1 entry point. Resolves idea-mode, runs discovery only, never raises."""
+    state = dict(state)
+    try:
+        if state.get("idea") and not state.get("company"):
+            state = _resolve_idea(state, emit)
+        graph = build_discovery_graph(agents, emit)
+        return dict(graph.invoke(state))
+    except Exception as exc:  # noqa: BLE001 — the poller must never see an error
+        emit("system", f"discovery degraded at the outer boundary: {type(exc).__name__}: {exc}")
+        findings = list(state.get("low_signal_findings", []))
+        findings.append(f"discovery: {type(exc).__name__} at the outer boundary — degraded run")
+        return {**state, "competitors": state.get("competitors", []), "low_signal_findings": findings}
+
+
+def run_analysis(state: dict, agents: Mapping[str, NodeFn], emit: EmitFn) -> dict:
+    """Phase 2 entry point. Seeds the additive-reducer lanes so the fan-out from
+    START accumulates cleanly, runs the analysis graph, never raises."""
+    state = dict(state)
+    for lane in ("news_results", "product_results", "review_results", "low_signal_findings"):
+        state.setdefault(lane, [])
+    try:
+        graph = build_analysis_graph(agents, emit)
+        return dict(graph.invoke(state))
+    except Exception as exc:  # noqa: BLE001
+        emit("system", f"analysis degraded at the outer boundary: {type(exc).__name__}: {exc}")
+        findings = list(state.get("low_signal_findings", []))
+        findings.append(f"analysis: {type(exc).__name__} at the outer boundary — degraded run")
         return {**state, "report": None, "low_signal_findings": findings}

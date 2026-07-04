@@ -270,6 +270,40 @@ def fail_run(job_id: str, error: str) -> None:
             cur.execute(sql, (error, job_id))
 
 
+def confirm_run(job_id: str) -> Optional[str]:
+    """Atomic compare-and-swap for the /confirm gate.
+
+    Only a run in `awaiting_confirmation` transitions to `confirmed`, and the DB
+    serializes concurrent callers so exactly ONE wins. Returns the run id on
+    success, or None when the run isn't awaiting confirmation (wrong-state OR a
+    second /confirm) — the route maps None to 409, so Phase 2 launches exactly
+    once and a double-confirm never double-runs the agents.
+    """
+    sql = """
+        UPDATE runs SET status = 'confirmed', current_stage = 'confirmed'
+        WHERE job_id = %s AND status = 'awaiting_confirmation'
+        RETURNING id::text
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (job_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def run_id_exists(run_id: str) -> bool:
+    """True if a run with this id exists — backs the evidence endpoint's 404 gate.
+
+    Compares on id::text so a malformed (non-uuid) run_id returns False instead
+    of raising, keeping the route on the 404 path rather than a 500.
+    """
+    sql = "SELECT 1 FROM runs WHERE id::text = %s"
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (run_id,))
+            return cur.fetchone() is not None
+
+
 def get_run(job_id: str) -> Optional[dict]:
     """Fetch the full run row (the poller's only read)."""
     sql = """
@@ -322,6 +356,36 @@ def save_competitors(run_id: str, rows: list[dict]) -> None:
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.executemany(sql, params)
+
+
+def replace_competitors(run_id: str, rows: list[dict]) -> None:
+    """Overwrite a run's competitor list with the user-confirmed set (/confirm).
+
+    Discovery's proposal is deleted first so Phase 2 analyzes EXACTLY what the
+    user approved — no leftover rivals the user removed. Delete + insert run in
+    one transaction (single pooled connection).
+    """
+    ins = "INSERT INTO competitors (run_id, name, category, rationale) VALUES (%s, %s, %s, %s)"
+    params = [(run_id, r["name"], r.get("category", "direct"), r.get("rationale", "")) for r in rows]
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM competitors WHERE run_id = %s", (run_id,))
+            if params:
+                cur.executemany(ins, params)
+
+
+def get_run_company(run_id: str) -> Optional[dict]:
+    """Return {name, domain} for a run's company — Phase 2 needs the company name
+    (not carried on RunStatus) to frame agent prompts and stamp the report."""
+    sql = """
+        SELECT c.name, c.domain
+        FROM runs r JOIN companies c ON c.id = r.company_id
+        WHERE r.id::text = %s
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (run_id,))
+            return cur.fetchone()
 
 
 def get_competitors(run_id: str) -> list[dict]:
