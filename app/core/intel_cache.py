@@ -78,7 +78,12 @@ def gather(kind: str, names: list[str], run_subset: Callable[[list[str]], list],
     # names fall through as missing and are skipped below — never mismatched.
     for name, item in zip(to_gather, fresh):
         fresh_by_name[name] = item
-        _put(kind, name, _as_dict(item))
+        d = _as_dict(item)
+        # Do NOT cache a degraded/low-signal result (e.g. gathered during a transient
+        # 429), or a re-run would reuse the empty intel for the whole TTL and stay
+        # degraded. Only good intel gets cached.
+        if not (isinstance(d, dict) and d.get("low_signal")):
+            _put(kind, name, d)
 
     out: list = []
     for name in names:

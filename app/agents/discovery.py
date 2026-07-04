@@ -92,7 +92,7 @@ def _build_corpus(company: str, domain: str, month: str, emit) -> str:
             title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
             corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
 
-    return corpus[:config.CORPUS_CAP]  # prompt budget cap (6000 default, 12000 under RICH_SEARCH)
+    return corpus[:config.CORPUS_CAP]  # prompt budget cap (6500 default, 12000 under RICH_SEARCH)
 
 
 def _build_prompt(company: str, domain: str, corpus: str) -> str:

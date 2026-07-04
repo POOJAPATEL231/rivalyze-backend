@@ -129,10 +129,13 @@ def _coerce_sentiment(raw: dict, rivals: list[str] | None = None) -> dict:
     rivals = rivals or []
     out: dict = {}
     for rival, v in (raw or {}).items():
-        name = _match_confirmed(str(rival), rivals) if rivals else str(rival)
-        if not name:
-            continue  # model named a rival we didn't confirm — the UI can't join it
-        out[name] = _one_sentiment(v)
+        try:
+            name = _match_confirmed(str(rival), rivals) if rivals else str(rival)
+            if not name:
+                continue  # model named a rival we didn't confirm — the UI can't join it
+            out[name] = _one_sentiment(v)
+        except Exception:  # noqa: BLE001 — a malformed entry costs the rival, not the report
+            continue
     return out
 
 
@@ -146,18 +149,26 @@ def _match_confirmed(key: str, rivals: list[str]) -> str | None:
     slugs = {_slug(r): r for r in rivals}
     if ks in slugs:
         return slugs[ks]
-    candidates = [r for s, r in slugs.items() if s and (ks.startswith(s) or s.startswith(ks))]
+    # WORD-BOUNDARY prefix only, so "swiggy-instamart" maps to "swiggy" but a genuinely
+    # different product like "metabase" is NOT grabbed onto "meta".
+    candidates = [r for s, r in slugs.items()
+                  if s and (ks.startswith(s + "-") or s.startswith(ks + "-"))]
     return max(candidates, key=lambda r: len(_slug(r))) if candidates else None
 
 
 def _one_sentiment(v) -> SentimentScore:
+    raw_score = v.get("score", 0.5) if isinstance(v, dict) else 0.5
     try:
-        score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
+        score = float(raw_score)
     except (TypeError, ValueError):
         score = 0.5
     if score > 1.0:                       # model used a 0-100 (or 0-10) scale
         score = score / 100.0 if score > 10.0 else score / 10.0
-    label = ((v.get("label") if isinstance(v, dict) else "") or "NEUTRAL").strip().upper()
+    # str() before string ops: a weak model can return a non-string label
+    # ({"value":"POSITIVE"} or a number) which would otherwise raise and, since
+    # _coerce_sentiment runs outside run()'s try, lose the ENTIRE report.
+    raw_label = v.get("label") if isinstance(v, dict) else ""
+    label = (str(raw_label) if raw_label else "NEUTRAL").strip().upper()
     return SentimentScore(score=max(0.0, min(1.0, score)),
                           label=label if label in _SENTIMENTS else "NEUTRAL")
 

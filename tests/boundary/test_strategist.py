@@ -82,6 +82,22 @@ def test_sentiment_keys_remapped_to_confirmed_rivals():
     assert out["Zomato"].label == "POSITIVE"
 
 
+def test_sentiment_survives_non_string_label():
+    # a weak model can return a nested/numeric label — must NOT raise (which would
+    # lose the whole report, since _coerce_sentiment runs outside run()'s try)
+    raw = {"Swiggy": {"score": 0.8, "label": {"value": "POSITIVE"}},
+           "Zomato": {"score": 0.7, "label": 1}}
+    out = strategist._coerce_sentiment(raw, rivals=["Swiggy", "Zomato"])
+    assert set(out) == {"Swiggy", "Zomato"}                    # rivals kept, no crash
+    assert out["Swiggy"].label == "NEUTRAL" and out["Zomato"].label == "NEUTRAL"
+
+
+def test_match_confirmed_does_not_misgrab_sibling():
+    assert strategist._match_confirmed("Metabase", ["Meta"]) is None      # NOT mapped to Meta
+    assert strategist._match_confirmed("Swiggy Instamart", ["Swiggy"]) == "Swiggy"
+    assert strategist._match_confirmed("swiggy", ["Swiggy"]) == "Swiggy"
+
+
 def test_sentiment_bad_score_falls_back_not_dropped():
     out = strategist._coerce_sentiment({"Swiggy": {"score": "high", "label": "POSITIVE"}},
                                        rivals=["Swiggy"])

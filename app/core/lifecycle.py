@@ -243,7 +243,9 @@ def start_analysis(job_id: str, run_id: str, confirmed: list[dict]) -> None:
             from ..core import report_eval
             scores = report_eval.evaluate(report_dict, company, emit)
             if scores:
-                lane_stats["report_score"] = scores["overall_score"]
+                # lane_stats is typed dict[str,int]; store a rounded int so the poll
+                # (RunStatus) never fails validation on a fractional score.
+                lane_stats["report_score"] = int(round(scores["overall_score"]))
         _persist_lane_stats(job_id, lane_stats)
         emit("system", f"report ready · completed in {time.time() - t0:.1f}s")
     except Exception:  # noqa: BLE001 — cosmetic; the run is already completed
