@@ -36,5 +36,7 @@ pytest>=8.0
 # optional search fallback:
 # ddgs
 
-respx>=0.21                # mocks httpx in tests (search_chain, etc.)
+respx>=0.21                # mocks httpx in tests (search_chain, warmup script, etc.)
 # NOTE: ddgs is banned by spec for search_chain.py — do not re-add.
+
+rich>=13.7                 # console output for scripts/warmup.py (was only a transitive dep before)

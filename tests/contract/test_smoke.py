@@ -39,7 +39,10 @@ def _cleanup():
 def test_health_is_open_and_shaped():
     r = client.get("/api/v1/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "service": "rivalyze"}
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "rivalyze"
+    assert isinstance(body["counters"], dict)  # per-provider daily credit counts
 
 
 def test_analyze_then_poll_completes_and_persists():
