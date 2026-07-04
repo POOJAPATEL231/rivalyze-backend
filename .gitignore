@@ -6,4 +6,4 @@ __pycache__/
 warmup_manifest.json
 test_redis.py
 .env.example
-Project_Understanding
+Project_Understanding/
