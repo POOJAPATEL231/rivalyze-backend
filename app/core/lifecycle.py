@@ -16,6 +16,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime
 
 from fastapi import BackgroundTasks
 
@@ -30,10 +31,16 @@ from ..models import (
     AnalyzeRequest,
     AnalyzeResponse,
     Competitor,
+    CompetitiveReport,
     CompetitorSet,
     RunEvent,
     RunStatus,
+    Swot,
 )
+
+# Statuses at/after which discovery has finished — used to tell "discovery done,
+# 0 rivals found" apart from "still discovering" in the poll shape.
+_DISCOVERY_DONE = {"awaiting_confirmation", "confirmed", "running_analysis", "completed"}
 
 logger = logging.getLogger(__name__)
 
@@ -160,23 +167,47 @@ def start_analysis(job_id: str, run_id: str, confirmed: list[dict]) -> None:
 
         report = final.get("report")
         report_dict = report.model_dump() if hasattr(report, "model_dump") else report
-        if report_dict:
-            repository.save_report(run_id, report_dict)
-            repository.finish_run(job_id, report_dict.get("threat_level"),
-                                  _report_confidence(report_dict))
-            emit("system", f"report ready · threat={report_dict.get('threat_level')}")
-        else:
-            # Degraded run: no valid report survived validation. Still a completed
-            # run (never a 500), just without a persisted CompetitiveReport.
-            repository.finish_run(job_id)
-            emit("system", "analysis completed with degraded (empty) report")
-
-        _persist_lane_stats(job_id, lane_stats)
-        emit("system", f"completed in {time.time() - t0:.1f}s")
+        if not report_dict:
+            # Degraded run: no valid report survived validation. Persist an HONEST
+            # shell (not nothing) so GET /reports/{run_id} returns 200 with an
+            # "insufficient signal" report instead of a 404 dead-end — the poll
+            # exposes run_id for any completed run.
+            report_dict = _degraded_report_shell(company, final)
+            emit("system", "analysis completed with degraded (low-signal) report")
+        repository.save_report(run_id, report_dict)
+        repository.finish_run(job_id, report_dict.get("threat_level"),
+                              _report_confidence(report_dict))
     except Exception:
         logger.exception("analysis %s failed", job_id)
         repository.fail_run(job_id, "internal pipeline error")
         emit("system", "failed: internal error")
+        return
+
+    # Post-completion bookkeeping. The run is ALREADY completed+persisted; a failure
+    # here (a transient DB blip on the event/lane-stats write) must NOT flip a good,
+    # report-bearing run to "failed" — which would strand the UI away from a report
+    # that is sitting in the DB. So it runs outside the try above and is swallowed.
+    try:
+        _persist_lane_stats(job_id, lane_stats)
+        emit("system", f"report ready · completed in {time.time() - t0:.1f}s")
+    except Exception:  # noqa: BLE001 — cosmetic; the run is already completed
+        logger.warning("analysis %s: post-completion bookkeeping failed (run already completed)", job_id)
+
+
+def _degraded_report_shell(company: str, final: dict) -> dict:
+    """A minimal, honest CompetitiveReport for a run whose synthesis degraded — so
+    the report route returns 200 with a clear 'insufficient signal' message and the
+    low_signal_findings, instead of the UI hitting a 404 on a 'completed' run."""
+    findings = list(final.get("low_signal_findings") or [])
+    return CompetitiveReport(
+        company=company or "our company",
+        threat_level="MEDIUM",
+        executive_summary=("This analysis could not gather enough signal to produce a full "
+                           "competitive report. Please try again, or re-run with different rivals."),
+        swot=Swot(), sentiment={}, head_to_head=[], opportunities=[], recommendations=[],
+        low_signal_findings=findings or ["analysis: degraded run — insufficient signal"],
+        analysis_date=datetime.now().strftime("%Y-%m-%d"),
+    ).model_dump()
 
 
 # ===================================== poll =====================================
@@ -192,7 +223,15 @@ def get_run(job_id: str) -> RunStatus | None:
     if row is None:
         return None
     competitors = repository.get_competitors(row["id"])
-    result = CompetitorSet(competitors=[Competitor(**c) for c in competitors]) if competitors else None
+    if competitors:
+        result = CompetitorSet(competitors=[Competitor(**c) for c in competitors])
+    elif row["status"] in _DISCOVERY_DONE:
+        # Discovery finished but found 0 rivals: return an EMPTY set (not None) so the
+        # UI can tell "done, none found — add your own" apart from "still discovering",
+        # and isn't stranded at awaiting_confirmation with an ambiguous null result.
+        result = CompetitorSet(competitors=[])
+    else:
+        result = None
     return RunStatus(
         job_id=row["job_id"],
         status=row["status"],
