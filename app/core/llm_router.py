@@ -152,6 +152,32 @@ def _mock_completion(prompt: str) -> str:
     return json.dumps({"answer": "mock"})
 
 
+def _keys_for(key_env: str) -> list[str]:
+    """All API keys configured for a provider, in rotation order.
+
+    Supports MULTIPLE keys per provider two ways (mix freely):
+      - comma-separated in the base var:  GROQ_API_KEY=key1,key2,key3
+      - numbered variants:                GROQ_API_KEY_2=key2, GROQ_API_KEY_3=...
+    The router tries the next key for the SAME provider when one is
+    rate-limited / out of quota (or rejected) before failing over to a
+    different provider. A single key (no comma, no _2) behaves exactly as before.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    candidates = [os.getenv(key_env, "")]
+    i = 2
+    while os.getenv(f"{key_env}_{i}"):
+        candidates.append(os.getenv(f"{key_env}_{i}", ""))
+        i += 1
+    for c in candidates:
+        for k in c.split(","):
+            k = k.strip()
+            if k and k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return keys
+
+
 def complete(task_class: str, prompt: str, schema: type[BaseModel],
              emit=lambda agent, msg: None):
     """Returns (validated_model, lane_name). Raises RuntimeError only if
@@ -170,58 +196,69 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
         except ValidationError as ve:
             raise RuntimeError(f"mock lane schema-fail: {ve.errors()[0]['msg']}")
 
-    lanes = [lane for lane in LANES[task_class] if os.getenv(lane[2])]
+    lanes = [lane for lane in LANES[task_class] if _keys_for(lane[2])]
     if not lanes:
         raise RuntimeError("no LLM lane configured — set at least one *_API_KEY")
 
     last_err = "unknown"
     for name, base, key_env, model in lanes:
-        for attempt in range(1, ATTEMPTS_PER_LANE + 1):
-            try:
-                emit("router", f"{name}/{model} · attempt {attempt}")
-                payload = {"model": model, "temperature": 0.1,
-                           "max_tokens": 1024,  # bound response size/latency/cost
-                           "response_format": {"type": "json_object"},
-                           "messages": [
-                               {"role": "system",
-                                "content": "Reply with a single JSON object only. No prose, no code fences."},
-                               {"role": "user", "content": prompt}]}
-                if name == "gemini":
-                    # Gemini 2.5 models "think" by default even over the OpenAI-
-                    # compat endpoint: invisible reasoning tokens are drawn from
-                    # the SAME max_tokens budget as the visible JSON, and the API
-                    # doesn't report them under completion_tokens, so a truncated
-                    # response looks like plenty of budget was left. Confirmed by
-                    # hand: with reasoning left on, a real discovery-shaped prompt
-                    # came back finish_reason="length" after burning ~980 of 1024
-                    # tokens on thinking, with the visible JSON cut off mid-string
-                    # (schema-fail: "EOF while parsing a string") — every single
-                    # call failed over for this reason, not a genuine outage.
-                    # reasoning_effort="none" turns thinking off so the full
-                    # budget goes to the JSON we actually asked for.
-                    payload["reasoning_effort"] = "none"
-                r = httpx.post(
-                    f"{base}/chat/completions",
-                    headers={"Authorization": f"Bearer {os.environ[key_env]}"},
-                    json=payload,
-                    timeout=TIMEOUT)
-                if r.status_code == 429:
-                    wait = float(r.headers.get("retry-after", 0) or 0)
-                    wait = min(wait or (1.5 ** attempt + random.random()), 8.0)
-                    emit("router", f"{name} 429 · backoff {wait:.1f}s")
-                    time.sleep(wait)
-                    continue
-                r.raise_for_status()
-                raw = r.json()["choices"][0]["message"]["content"]
+        keys = _keys_for(key_env)
+        for ki, key in enumerate(keys, 1):
+            tag = f" · key {ki}/{len(keys)}" if len(keys) > 1 else ""
+            next_provider = False
+            for attempt in range(1, ATTEMPTS_PER_LANE + 1):
                 try:
-                    return schema.model_validate_json(_repair_json(raw)), name
-                except ValidationError as ve:
-                    last_err = f"{name} schema-fail: {ve.errors()[0]['msg']}"
-                    emit("router", f"{name} parse failed · failing over")
-                    break  # parse failure -> next lane, don't retry same lane
-            except httpx.HTTPError as e:
-                last_err = f"{name}: {e}"
-                emit("router", f"{name} error · {type(e).__name__}")
-                time.sleep(min(1.5 ** attempt, 4.0))
-        # lane exhausted -> next
+                    emit("router", f"{name}/{model} · attempt {attempt}{tag}")
+                    payload = {"model": model, "temperature": 0.1,
+                               "max_tokens": 1024,  # bound response size/latency/cost
+                               "response_format": {"type": "json_object"},
+                               "messages": [
+                                   {"role": "system",
+                                    "content": "Reply with a single JSON object only. No prose, no code fences."},
+                                   {"role": "user", "content": prompt}]}
+                    if name == "gemini":
+                        # Gemini 2.5 "thinks" by default over the OpenAI-compat
+                        # endpoint, drawing invisible reasoning tokens from the same
+                        # max_tokens budget and truncating the JSON. Turn it off so
+                        # the full budget goes to the JSON we asked for.
+                        payload["reasoning_effort"] = "none"
+                    r = httpx.post(
+                        f"{base}/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json=payload,
+                        timeout=TIMEOUT)
+                    # 429 = out of quota / rate-limited, 401/403 = bad or blocked
+                    # key — all key-specific. If another key exists for THIS
+                    # provider, rotate to it immediately before failing over to a
+                    # different (weaker/slower) provider.
+                    if r.status_code in (429, 401, 403):
+                        last_err = f"{name}: HTTP {r.status_code} (key {ki}/{len(keys)})"
+                        if ki < len(keys):
+                            emit("router", f"{name} HTTP {r.status_code} · key {ki}/{len(keys)} exhausted · rotating key")
+                            break  # -> next key, same provider
+                        if r.status_code == 429:
+                            wait = float(r.headers.get("retry-after", 0) or 0)
+                            wait = min(wait or (1.5 ** attempt + random.random()), 8.0)
+                            emit("router", f"{name} 429 · last key · backoff {wait:.1f}s")
+                            time.sleep(wait)
+                            continue  # retry the last key after backoff
+                        emit("router", f"{name} HTTP {r.status_code} · no keys left · failing over")
+                        next_provider = True
+                        break
+                    r.raise_for_status()
+                    raw = r.json()["choices"][0]["message"]["content"]
+                    try:
+                        return schema.model_validate_json(_repair_json(raw)), name
+                    except ValidationError as ve:
+                        last_err = f"{name} schema-fail: {ve.errors()[0]['msg']}"
+                        emit("router", f"{name} parse failed · failing over")
+                        next_provider = True  # a new key won't change the output
+                        break
+                except httpx.HTTPError as e:
+                    last_err = f"{name}: {e}"
+                    emit("router", f"{name} error · {type(e).__name__}")
+                    time.sleep(min(1.5 ** attempt, 4.0))
+            if next_provider:
+                break  # stop trying this provider's keys -> next provider
+        # all keys for this provider exhausted -> next provider
     raise RuntimeError(f"all lanes exhausted · last: {last_err}")
