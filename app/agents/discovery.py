@@ -11,9 +11,19 @@ typed CompetitorSet plus a low-signal event — the pipeline always completes.
 """
 from datetime import datetime
 
+from pydantic import BaseModel, Field
+
 from ..models import Competitor, CompetitorSet
 from ..core import search_chain as search_mod
 from ..core import llm_router
+
+
+class _Extraction(BaseModel):
+    """Lenient extraction schema — NO 4-item cap. A model that returns 5-6
+    competitors validates here and gets TRUNCATED in _post_filter, instead of
+    failing validation on every lane (CompetitorSet caps at 4) and degrading the
+    whole run to empty. The strict CompetitorSet is built from the filtered list."""
+    competitors: list[Competitor] = Field(default_factory=list)
 
 # Names that read as competitors on paper but are usually noise unless the
 # corpus explicitly ties them to an equivalent product (e.g. "Google Docs"
@@ -35,25 +45,23 @@ def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
     month = datetime.now().strftime("%B %Y")
     emit("discovery", f"target locked: {company} · {domain or 'domain inferred'}")
 
-    corpus = _build_corpus(company, domain, month, emit)
-    if not corpus.strip():
-        emit("discovery", "no search results returned · low signal")
-        result = CompetitorSet(competitors=[])
-        _persist(run_id, result, emit)
-        return result
-
-    prompt = _build_prompt(company, domain, corpus)
-
+    # Whole flow is guarded: a search-chain crash, a total lane exhaustion, or any
+    # other unexpected error degrades to an EMPTY typed set — discovery never
+    # raises (its contract), so the pipeline always completes.
+    result = CompetitorSet(competitors=[])
     try:
-        result, lane = llm_router.complete("extract", prompt, CompetitorSet, emit)
-    except RuntimeError as e:
-        emit("discovery", f"low signal: {e} · returning empty typed set")
+        corpus = _build_corpus(company, domain, month, emit)
+        if not corpus.strip():
+            emit("discovery", "no search results returned · low signal")
+        else:
+            prompt = _build_prompt(company, domain, corpus)
+            extracted, lane = llm_router.complete("extract", prompt, _Extraction, emit)
+            kept = _post_filter(extracted.competitors, company)
+            emit("discovery", f"{len(kept)} competitors extracted via {lane}")
+            result = CompetitorSet(competitors=kept)
+    except Exception as e:
+        emit("discovery", f"low signal: {type(e).__name__}: {e} · returning empty typed set")
         result = CompetitorSet(competitors=[])
-        _persist(run_id, result, emit)
-        return result
-
-    result.competitors = _post_filter(result.competitors, company)
-    emit("discovery", f"{len(result.competitors)} competitors extracted via {lane}")
 
     _persist(run_id, result, emit)
     return result
