@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from datetime import datetime
 
@@ -83,10 +84,9 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     per_competitor = dict(unified.per_competitor or {})
     evidence_index: dict[str, dict] = per_competitor.pop(EVIDENCE_INDEX_KEY, {}) or {}
     rivals = list(per_competitor.keys())
-    valid_ids = sorted(evidence_index.keys())
 
     try:
-        draft, lane = complete("reason", _prompt(company, rivals, valid_ids, per_competitor),
+        draft, lane = complete("reason", _prompt(company, rivals, evidence_index, per_competitor),
                                _ReportDraft, emit)
         emit("strategist", f"report synthesized via {lane}")
     except Exception as exc:  # noqa: BLE001 — all lanes exhausted / schema fail
@@ -105,8 +105,8 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
         threat_level=threat,
         executive_summary=draft.executive_summary or "No executive summary was produced this run.",
         swot=draft.swot,
-        sentiment=_coerce_sentiment(draft.sentiment),
-        head_to_head=_coerce_h2h(draft.head_to_head),
+        sentiment=_coerce_sentiment(draft.sentiment, rivals),
+        head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index), rivals),
         opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
                        for o in opps],
         recommendations=[Recommendation(action=r.action, rationale=r.rationale,
@@ -117,48 +117,169 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     )
 
 
-def _coerce_sentiment(raw: dict) -> dict:
-    """Model sentiment -> {rival: SentimentScore}, clamping score to [0,1] and any
-    non-enum label to NEUTRAL, dropping anything unparseable."""
+def _coerce_sentiment(raw: dict, rivals: list[str] | None = None) -> dict:
+    """Model sentiment -> {CONFIRMED_rival: SentimentScore}.
+
+    The frontend joins sentiment to a rival BY NAME, so a key the model spelled
+    differently ("swiggy", "Swiggy Instamart") would leave the gauge blank. We remap
+    every entry to the confirmed competitor name by slug and drop entries that match
+    no confirmed rival. Label is upper-cased before the enum check (so "positive"
+    isn't silently turned into NEUTRAL); score is parsed defensively (a 0-100 scale
+    is rescaled, an unparseable score falls back to 0.5 rather than dropping the rival)."""
+    rivals = rivals or []
     out: dict = {}
     for rival, v in (raw or {}).items():
-        try:
-            score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
-            label = (v.get("label") if isinstance(v, dict) else "") or "NEUTRAL"
-            out[str(rival)] = SentimentScore(
-                score=max(0.0, min(1.0, score)),
-                label=label if label in _SENTIMENTS else "NEUTRAL")
-        except Exception:  # noqa: BLE001 — a bad rival costs the rival, not the report
-            continue
+        name = _match_confirmed(str(rival), rivals) if rivals else str(rival)
+        if not name:
+            continue  # model named a rival we didn't confirm — the UI can't join it
+        out[name] = _one_sentiment(v)
     return out
 
 
-def _coerce_h2h(raw: list) -> list:
-    """Coerce head-to-head rows to H2HRow, dropping malformed ones."""
+def _match_confirmed(key: str, rivals: list[str]) -> str | None:
+    """Map a model-emitted rival key to the CONFIRMED competitor name. Exact slug
+    match first (handles case/punctuation), then prefix containment (handles a model
+    that adds or omits a suffix — "Swiggy Instamart" vs "Swiggy", "Zomato Ltd" vs
+    "Zomato"), choosing the longest match so a shorter sibling isn't grabbed. Returns
+    None if nothing plausibly matches."""
+    ks = _slug(key)
+    slugs = {_slug(r): r for r in rivals}
+    if ks in slugs:
+        return slugs[ks]
+    candidates = [r for s, r in slugs.items() if s and (ks.startswith(s) or s.startswith(ks))]
+    return max(candidates, key=lambda r: len(_slug(r))) if candidates else None
+
+
+def _one_sentiment(v) -> SentimentScore:
+    try:
+        score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
+    except (TypeError, ValueError):
+        score = 0.5
+    if score > 1.0:                       # model used a 0-100 (or 0-10) scale
+        score = score / 100.0 if score > 10.0 else score / 10.0
+    label = ((v.get("label") if isinstance(v, dict) else "") or "NEUTRAL").strip().upper()
+    return SentimentScore(score=max(0.0, min(1.0, score)),
+                          label=label if label in _SENTIMENTS else "NEUTRAL")
+
+
+def _slug(name: str) -> str:
+    """Match merge._slug so a head-to-head rival name maps to the same claim_ref
+    the evidence rows were stored under."""
+    return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "rival"
+
+
+def _claim_refs_by_competitor(index: dict) -> dict:
+    """slug(competitor) -> {source_type: claim_ref} from the evidence graph, so a
+    head-to-head cell can be linked to the drawer-queryable claim_ref for that
+    rival + dimension (e.g. the Pricing cell for Swiggy -> "pricing:swiggy")."""
+    out: dict = {}
+    for meta in (index or {}).values():
+        comp = _slug(meta.get("competitor", ""))
+        stype = meta.get("type", "")
+        cref = meta.get("claim_ref", "")
+        if comp and stype and cref:
+            out.setdefault(comp, {})[stype] = cref
+    return out
+
+
+def _metric_type(metric: str) -> str:
+    """Map a head-to-head dimension name to the evidence source_type most likely to
+    back it, so the cell links to the right slice of the evidence graph."""
+    m = (metric or "").lower()
+    if any(k in m for k in ("pric", "cost", "plan", "tier")):
+        return "pricing"
+    if any(k in m for k in ("sentiment", "complaint", "review", "satisfaction", "support", "nps")):
+        return "review"
+    return "news"  # features, momentum, market position, launches, partnerships, etc.
+
+
+def _first_claim_ref(avail: dict) -> str | None:
+    for t in ("pricing", "review", "news"):
+        if avail.get(t):
+            return avail[t]
+    return None
+
+
+def _coerce_h2h_cells(row):
+    """Coerce a row's rival cells so a bare string / scalar becomes {"value": ...} —
+    the shape H2HCell needs. Weak models often flatten cells ("rivals": {"Swiggy":
+    "cheaper"}) which would fail row validation and DROP the whole dimension; this
+    saves the row instead."""
+    if not isinstance(row, dict) or not isinstance(row.get("rivals"), dict):
+        return row
+    fixed = {k: (v if isinstance(v, dict) else {"value": "" if v is None else str(v)})
+             for k, v in row["rivals"].items()}
+    return {**row, "rivals": fixed}
+
+
+def _coerce_h2h(raw: list, claim_by_slug: dict | None = None,
+                rivals: list[str] | None = None) -> list:
+    """Coerce head-to-head rows to H2HRow, saving flattened cells, remapping each
+    rival cell key to the CONFIRMED competitor name (so the UI can join by name), and
+    attaching a drawer-queryable claim_ref from the evidence graph. A cell whose rival
+    or dimension has no evidence is left uncited (claim_ref stays None), never faked."""
+    claim_by_slug = claim_by_slug or {}
+    rivals = rivals or []
     out: list = []
     for row in (raw or []):
         try:
-            out.append(H2HRow.model_validate(row))
+            h = H2HRow.model_validate(_coerce_h2h_cells(row))
         except Exception:  # noqa: BLE001
             continue
+        stype = _metric_type(h.metric)
+        remapped: dict = {}
+        for rival, cell in (h.rivals or {}).items():
+            name = _match_confirmed(str(rival), rivals) or str(rival)  # keep original if unknown
+            if not cell.claim_ref:
+                avail = claim_by_slug.get(_slug(name), {})
+                cell.claim_ref = avail.get(stype) or _first_claim_ref(avail)
+            remapped[name] = cell
+        h.rivals = remapped
+        out.append(h)
     return out
 
 
 def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
-    """Drop items whose citations are ALL unknown; strip unknown ids from the rest;
-    recompute confidence (recommendations only) from the surviving evidence."""
+    """Strip unknown evidence ids and recompute confidence (recommendations only)
+    from the surviving evidence.
+
+    A weak model often can't reproduce the opaque `ev-xxxx` ids exactly, so it
+    cites ids that aren't in the index. We used to DELETE any item whose citations
+    were all-unknown — but that routinely zeroed the recommendations section (the
+    headline of the report). A concrete, uncited recommendation is more useful to
+    the board than an empty section, so we now KEEP it with its bogus ids stripped
+    and a floor confidence recomputed from zero evidence (~0.25). Code still owns
+    citations: an unknown id NEVER reaches the output, so nothing false is asserted."""
     kept = []
     for it in items or []:
         original = list(getattr(it, "evidence_ids", []) or [])
         known = [i for i in original if i in index]
         if original and not known:
-            emit("strategist", f"dropped {kind} citing only unknown evidence: {getattr(it, 'claim_ref', '?')}")
-            continue
+            emit("strategist", f"kept {kind} with unverifiable citations stripped: {getattr(it, 'claim_ref', '?')}")
         it.evidence_ids = known
         if hasattr(it, "confidence"):
             it.confidence = _recompute(known, index, confidence_fn)
         kept.append(it)
     return kept
+
+
+def _evidence_ledger(index: dict) -> str:
+    """Render the evidence index as a readable id->fact ledger, grouped by
+    competitor, so the model cites ids it can actually SEE. Each line is
+    `ev-id [type] "snippet" (source)` — a copyable token next to the fact it backs.
+    Bounded so a large graph can't blow the prompt budget."""
+    if not index:
+        return "(no evidence gathered this run)"
+    by_comp: dict[str, list[str]] = {}
+    for eid, meta in index.items():
+        comp = meta.get("competitor", "?")
+        snippet = (meta.get("snippet", "") or "").replace("\n", " ").strip()[:160]
+        line = f"  {eid} [{meta.get('type', '?')}] \"{snippet}\" ({meta.get('source_name', '?')})"
+        by_comp.setdefault(comp, []).append(line)
+    blocks = []
+    for comp, lines in by_comp.items():
+        blocks.append(f"{comp}:\n" + "\n".join(lines))
+    return "\n".join(blocks)[:6000]
 
 
 def _recompute(evidence_ids: list[str], index: dict, confidence_fn) -> float:
@@ -190,22 +311,39 @@ def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveR
     )
 
 
-def _prompt(company: str, rivals: list[str], valid_ids: list[str], rollups: dict) -> str:
-    rollup_json = json.dumps(rollups, ensure_ascii=False, default=str)[:8000]
+def _prompt(company: str, rivals: list[str], evidence_index: dict, rollups: dict) -> str:
+    rollup_json = json.dumps(rollups, ensure_ascii=False, default=str)[:12000]
+    ledger = _evidence_ledger(evidence_index)
     return f"""{_SENTINEL}
 You are the chief strategist for {company}. Turn the per-competitor intelligence
 rollups below into a board-ready competitive analysis.
 
 COMPETITORS: {', '.join(rivals) if rivals else '(none found)'}
-EVIDENCE_IDS: {', '.join(valid_ids) if valid_ids else '(none)'}
 
 Threat rubric: most markets are MEDIUM; HIGH requires explicit aggressive evidence
 (funding + pricing attack, or a direct feature assault); CRITICAL is existential.
 
-Every opportunity and recommendation MUST cite evidence_ids drawn ONLY from the
-EVIDENCE_IDS list above — citing an id not in that list deletes the item. Maximum 3
-recommendations, each concrete enough to start on Monday. Put confidence at 0.5 as a
-placeholder; the system recomputes the real number and discards yours.
+DEPTH REQUIREMENTS — a thin report is a failed report. Fill EVERY section from the
+rollups (only leave one empty if the rollups truly say nothing about it):
+- executive_summary: 3-5 full sentences — the overall threat and WHY, the 2-3 most
+  important rivals and how they pressure {company}, and the single clearest opening.
+- swot: 3-4 SPECIFIC items per quadrant, grounded in the rollups (not generic filler).
+- sentiment: ONE entry per competitor listed in COMPETITORS (score 0-1 + label).
+- head_to_head: 4-6 rows, each a DIFFERENT dimension — e.g. "Pricing", "Key Features",
+  "Market Position", "Customer Sentiment", "Recent Momentum", "Target Segment". Each
+  row's "you" is {company}'s stance; "rivals" compares EVERY competitor on that dimension.
+- opportunities: 3-5 concrete, evidence-cited gaps {company} can exploit.
+
+CITATIONS — every opportunity and recommendation should cite evidence_ids, and you
+may ONLY use ids that appear in the EVIDENCE LEDGER below. Copy the ids EXACTLY (they
+look like "ev-" followed by 8 hex characters) from the ledger line whose fact supports
+your point — do not invent or guess ids, and never cite an id from these instructions. Any id you cite that is not in the ledger is stripped out, so
+cite the real ones to keep your confidence score up. Maximum 3 recommendations, each
+concrete enough to start on Monday. Put confidence at 0.5 as a placeholder; the system
+recomputes the real number from your citations and discards yours.
+
+EVIDENCE LEDGER (cite these exact ids):
+{ledger}
 
 ROLLUPS (per competitor, JSON):
 {rollup_json}

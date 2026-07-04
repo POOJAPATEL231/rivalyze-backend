@@ -1,8 +1,11 @@
 """TC-B04 — the strategist owns the numbers and the citations, not the model.
 
-Confidence is recomputed from cited evidence (model numbers discarded); a rec
-citing ONLY unknown evidence ids is deleted; unknown ids are stripped from the
-rest. The MOCK lane exercises the full run() producing a valid report offline.
+Confidence is recomputed from cited evidence (model numbers discarded); unknown
+ids are stripped from every item. A rec that cites ONLY unknown ids is KEPT (with
+those ids stripped and a baseline confidence) rather than deleted — an empty
+recommendations section is worse for the board than a concrete-but-uncited action,
+and code still guarantees no unknown id ever reaches the output. The MOCK lane
+exercises the full run() producing a valid report offline.
 """
 from app.agents import strategist
 from app.core.confidence import confidence
@@ -19,11 +22,13 @@ _INDEX = {
 }
 
 
-def test_rec_citing_only_unknown_evidence_is_dropped():
+def test_rec_citing_only_unknown_evidence_is_kept_with_ids_stripped():
     recs = [Recommendation(action="a", rationale="r", confidence=0.9,
                            evidence_ids=["ev-missing"], claim_ref="rec:1")]
     kept = strategist._clean_cited(recs, _INDEX, confidence, _noop, kind="recommendation")
-    assert kept == []
+    assert len(kept) == 1
+    assert kept[0].evidence_ids == []                      # bogus id stripped, not asserted
+    assert kept[0].confidence == confidence(0, 0, 0)       # baseline, model's 0.9 discarded
 
 
 def test_unknown_ids_stripped_and_confidence_recomputed():
@@ -43,6 +48,61 @@ def test_rec_with_no_citations_is_kept_with_baseline_confidence():
     kept = strategist._clean_cited(recs, _INDEX, confidence, _noop, kind="recommendation")
     assert len(kept) == 1
     assert kept[0].confidence == confidence(0, 0, 0)       # 0.25 baseline
+
+
+def test_h2h_cells_get_drawer_queryable_claim_ref():
+    # evidence graph: Coda has pricing + review evidence; the h2h cells must be
+    # linked to the claim_ref the drawer can query, chosen by the dimension.
+    index = {
+        "ev-1": {"competitor": "Coda", "type": "pricing", "claim_ref": "pricing:coda"},
+        "ev-2": {"competitor": "Coda", "type": "review", "claim_ref": "review:coda"},
+    }
+    cbs = strategist._claim_refs_by_competitor(index)
+    raw = [
+        {"metric": "Pricing", "you": "us", "rivals": {"Coda": {"value": "$10"}}},
+        {"metric": "Customer Sentiment", "you": "us", "rivals": {"Coda": {"value": "mixed"}}},
+        {"metric": "Market Position", "you": "us", "rivals": {"Coda": {"value": "leader"}}},
+    ]
+    rows = strategist._coerce_h2h(raw, cbs)
+    assert rows[0].rivals["Coda"].claim_ref == "pricing:coda"          # pricing dimension
+    assert rows[1].rivals["Coda"].claim_ref == "review:coda"           # sentiment -> review
+    # "Market Position" -> news, which has no evidence -> falls back to an available ref
+    assert rows[2].rivals["Coda"].claim_ref in {"pricing:coda", "review:coda"}
+
+
+def test_sentiment_keys_remapped_to_confirmed_rivals():
+    # model spells the rival differently -> must still join to the confirmed name
+    raw = {"swiggy": {"score": 0.2, "label": "negative"},
+           "Zomato Ltd": {"score": 90, "label": "POSITIVE"},
+           "Ghost Co": {"score": 0.5, "label": "NEUTRAL"}}
+    out = strategist._coerce_sentiment(raw, rivals=["Swiggy", "Zomato"])
+    assert set(out) == {"Swiggy", "Zomato"}                # remapped + unknown dropped
+    assert out["Swiggy"].label == "NEGATIVE"               # lower-case label upper-cased
+    assert out["Zomato"].score == 0.9                      # 0-100 scale rescaled
+    assert out["Zomato"].label == "POSITIVE"
+
+
+def test_sentiment_bad_score_falls_back_not_dropped():
+    out = strategist._coerce_sentiment({"Swiggy": {"score": "high", "label": "POSITIVE"}},
+                                       rivals=["Swiggy"])
+    assert "Swiggy" in out and out["Swiggy"].score == 0.5  # unparseable -> 0.5, rival kept
+
+
+def test_h2h_flattened_string_cell_is_saved_not_dropped():
+    # a row whose cells are bare strings must NOT drop the whole dimension
+    raw = [{"metric": "Pricing", "you": "us",
+            "rivals": {"Swiggy": "cheaper plans", "zomato": "premium"}}]
+    rows = strategist._coerce_h2h(raw, {}, rivals=["Swiggy", "Zomato"])
+    assert len(rows) == 1
+    assert set(rows[0].rivals) == {"Swiggy", "Zomato"}     # keys remapped to confirmed
+    assert rows[0].rivals["Swiggy"].value == "cheaper plans"
+
+
+def test_h2h_cell_without_evidence_stays_uncited():
+    rows = strategist._coerce_h2h(
+        [{"metric": "Pricing", "you": "us", "rivals": {"Ghost": {"value": "?"}}}],
+        strategist._claim_refs_by_competitor({}))
+    assert rows[0].rivals["Ghost"].claim_ref is None                   # never faked
 
 
 def test_run_produces_valid_report_offline():

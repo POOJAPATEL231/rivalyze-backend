@@ -46,6 +46,7 @@ except ImportError:
     def cache_set(key: str, value, ttl: int = 86400):
         _LOCAL_CACHE[key] = value
 
+from app.core import config
 from app.core.counters import counter_incr, today_key
 
 logger = logging.getLogger(__name__)
@@ -124,7 +125,9 @@ def _tavily(query: str, emit) -> list[dict] | None:
     try:
         emit("search", f'"{query}" · tavily')
         r = httpx.post("https://api.tavily.com/search",
-                       json={"api_key": key, "query": query, "max_results": 3},
+                       json={"api_key": key, "query": query,
+                             "max_results": config.SEARCH_MAX_RESULTS,
+                             "search_depth": config.SEARCH_DEPTH},
                        timeout=25.0)
         r.raise_for_status()
         # Only count this as a spend against the daily budget once we know
@@ -153,7 +156,7 @@ def _serper(query: str, emit) -> list[dict] | None:
         r = httpx.post(
             "https://google.serper.dev/search",
             headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            json={"q": query, "num": 3},
+            json={"q": query, "num": config.SEARCH_MAX_RESULTS},
             timeout=20.0,
         )
         r.raise_for_status()
