@@ -1,0 +1,32 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Rivalyze</title>
+<style>
+body{font-family:ui-monospace,monospace;background:#090B14;color:#EBEDF7;max-width:760px;margin:40px auto;padding:0 20px}
+h1{font-size:18px}h1 s{color:#24CDB6;text-decoration:none}
+input,button{font:inherit;padding:9px 12px;border-radius:8px;border:1px solid #2a3155;background:#11152A;color:#EBEDF7}
+button{background:linear-gradient(135deg,#24CDB6,#8E7CF7);color:#06121B;border:none;cursor:pointer;font-weight:600}
+#ledger{background:#070910;border:1px solid #2a3155;border-radius:10px;padding:14px;height:240px;overflow-y:auto;font-size:12px;line-height:1.8;margin:16px 0}
+#ledger .a{color:#F2C572}#ledger .r{color:#8E7CF7}#ledger .s{color:#24CDB6}
+#out{background:#11152A;border:1px solid #2a3155;border-radius:10px;padding:14px;font-size:12px;white-space:pre-wrap}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+</style></head><body>
+<h1><s>Rivalyze</s> · vertical slice — input → discovery → router → typed JSON → render</h1>
+<div class="row">
+<input id="c" value="Notion" placeholder="company"><input id="d" value="connected workspace software" placeholder="domain" size="30">
+<button onclick="go()">Analyze</button></div>
+<div id="ledger"></div><div id="out">result appears here</div>
+<script>
+async function go(){
+  const led=document.getElementById('ledger');led.innerHTML='';document.getElementById('out').textContent='…';
+  const r=await fetch('/api/v1/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({company:c.value,domain:d.value})});
+  const {job_id}=await r.json();let seen=0;
+  const iv=setInterval(async()=>{
+    const s=await (await fetch('/api/v1/runs/'+job_id)).json();
+    s.events.slice(seen).forEach(e=>{const cl=e.agent==='discovery'?'a':e.agent==='router'?'r':'s';
+      led.innerHTML+=`<div><span class="s">${e.t}s</span> <span class="${cl}">[${e.agent}]</span> ${e.msg}</div>`;});
+    seen=s.events.length;led.scrollTop=1e9;
+    if(s.status==='completed'||s.status==='failed'){clearInterval(iv);
+      document.getElementById('out').textContent=JSON.stringify({status:s.status,lane_stats:s.lane_stats,result:s.result,error:s.error},null,2);}
+  },700);
+}
+</script></body></html>
