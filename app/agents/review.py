@@ -34,11 +34,27 @@ import logging
 from datetime import datetime
 from typing import Callable, Literal
 
+from pydantic import BaseModel, Field
+
 from app.core.llm_router import complete
 from app.core.search_chain import search
 from app.models import SentimentIntel
 
 logger = logging.getLogger(__name__)
+
+
+class _SentimentExtraction(BaseModel):
+    """Lenient extraction schema — no 3-item caps and a plain-str sentiment, so a
+    model returning 4 complaints or "Positive"/"MIXED" validates and gets fixed up
+    in _sanitise (truncate to 3, coerce the enum), instead of failing validation
+    on every lane (SentimentIntel caps at 3 + a strict Literal) and degrading the
+    competitor to low_signal."""
+    competitor: str = ""
+    top_complaints: list[str] = Field(default_factory=list)
+    opportunity_gaps: list[str] = Field(default_factory=list)
+    overall_sentiment: str = "NEUTRAL"
+    sources: list[str] = Field(default_factory=list)
+    low_signal: bool = False
 
 # Refresh the month label each import so a long-running process still uses
 # the current month in its search queries.
@@ -62,6 +78,15 @@ _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
 
 # System prompt — kept verbatim from docs/llm_prompts.md §REVIEWS, with
 # explicit anti-nesting examples added so weak models don't return objects.
+#
+# NOTE (Tushar): same bug as product.py's _SYSTEM — the example JSON used to
+# omit "competitor", which SentimentIntel requires. MOCK_MODE never caught it
+# because the mock lane always injects a "competitor" placeholder regardless
+# of the prompt; a real Gemini call follows the example literally, omits the
+# key, and fails validation with "Field required" -> every competitor
+# degrades to low_signal. `_sanitise()` re-stamps `competitor` with the
+# caller's known-good name after validation anyway, so accuracy here doesn't
+# matter, only presence.
 _SYSTEM_PROMPT = """Mine customer complaints about {competitor} from the corpus
 (reviews, Reddit, forums, app stores).
 
@@ -78,8 +103,10 @@ other values. Default NEUTRAL if corpus is mixed.
 
 sources: ONLY URLs that actually appear in the corpus above. Never invent.
 
+"competitor" must be exactly "{competitor}".
+
 Return ONLY JSON (no markdown fences, no commentary):
-{{"top_complaints":[],"opportunity_gaps":[],"overall_sentiment":"NEUTRAL","sources":[]}}"""
+{{"competitor":"{competitor}","top_complaints":[],"opportunity_gaps":[],"overall_sentiment":"NEUTRAL","sources":[]}}"""
 
 
 # ---------- public API ----------
@@ -151,7 +178,7 @@ def _run_single(
         + f"\n\nCORPUS:\n{corpus}"
     )
     try:
-        model_instance, _lane = complete("extract", prompt, SentimentIntel, emit)
+        model_instance, _lane = complete("extract", prompt, _SentimentExtraction, emit)
     except Exception as exc:
         # All lanes exhausted, JSON-repair failed, schema mismatch, etc.
         # The plan says callers convert this to low_signal.

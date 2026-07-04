@@ -17,6 +17,31 @@ def _flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default) == "1"
 
 
+def _int_env(name: str, default: int) -> int:
+    """Parse an int env var, falling back to `default` on a blank/garbage value.
+
+    A bad value (e.g. JWT_EXPIRE_MINUTES="" or "60m") must NOT crash config
+    import — that would take down the whole app at startup over one env typo.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        log.warning("config: %s=%r is not an integer — using default %d", name, raw, default)
+        return default
+
+
+def _redis_storage_uri(redis_url: str) -> str:
+    """Rate-limiter storage. Use REDIS_URL only if it has a real scheme; a
+    scheme-less value (a bare host:port) would crash the limits backend, so fall
+    back to in-process memory rather than take down startup."""
+    if redis_url.startswith(("redis://", "rediss://", "unix://")):
+        return redis_url
+    return "memory://"
+
+
 # --- run mode ---
 MOCK_MODE: bool = _flag("MOCK_MODE")        # 1 = deterministic offline lanes, zero keys
 DEMO_RESERVE: bool = _flag("DEMO_RESERVE")  # 1 = hold budget back for the live demo
@@ -41,16 +66,16 @@ REDIS_URL: str = os.getenv("REDIS_URL", "")
 JWT_SECRET: str = os.getenv("JWT_SECRET") or secrets.token_urlsafe(32)
 JWT_SECRET_IS_EPHEMERAL: bool = "JWT_SECRET" not in os.environ
 JWT_ALGORITHM: str = "HS256"
-JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+JWT_EXPIRE_MINUTES: int = _int_env("JWT_EXPIRE_MINUTES", 60)
 # Refresh tokens are long-lived and revocable (stored hashed in refresh_tokens).
-REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS: int = _int_env("REFRESH_TOKEN_EXPIRE_DAYS", 30)
 
 # --- rate limiting (auth endpoints, keyed by client IP) ---
 # Throttles online brute-force / credential-stuffing that bcrypt alone can't stop.
 # Redis-backed when REDIS_URL is set (limits survive restarts + are shared across
 # workers); otherwise in-process memory. Disable in tests via RATE_LIMIT_ENABLED=0.
 RATE_LIMIT_ENABLED: bool = _flag("RATE_LIMIT_ENABLED", "1")
-RATE_LIMIT_STORAGE_URI: str = os.getenv("RATELIMIT_STORAGE_URI") or (REDIS_URL or "memory://")
+RATE_LIMIT_STORAGE_URI: str = os.getenv("RATELIMIT_STORAGE_URI") or _redis_storage_uri(REDIS_URL)
 AUTH_RATELIMIT_SIGNUP: str = os.getenv("RATELIMIT_SIGNUP", "5/minute")
 AUTH_RATELIMIT_LOGIN: str = os.getenv("RATELIMIT_LOGIN", "10/minute")
 AUTH_RATELIMIT_REFRESH: str = os.getenv("RATELIMIT_REFRESH", "10/minute")

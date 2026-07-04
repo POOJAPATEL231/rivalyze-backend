@@ -29,13 +29,24 @@ _LOW_SIGNAL_THRESHOLD = 300
 # Bare-JSON system prompt. The "PLAIN STRINGS" + wrong-example line is the
 # single most important line in this file — LLMs default to nesting pricing
 # into {"tier":..., "price":...} objects, which breaks Krutarth's h2h table.
+#
+# NOTE (Tushar): this template's example JSON used to omit "competitor"
+# entirely, even though ProductIntel requires it. That was invisible under
+# MOCK_MODE — the mock lane always injects a "competitor": "mock" placeholder
+# regardless of what the prompt asks for — but a real Gemini call follows the
+# example JSON literally and leaves the key out, which fails Pydantic
+# validation with "Field required" and every extraction degrades to
+# low_signal. `_process()` re-stamps `.competitor` with the caller's
+# known-good name after validation anyway (see below), so the value the
+# model puts here doesn't need to be accurate, just present.
 _SYSTEM = (
     'Extract pricing and product positioning for {competitor}. '
     'pricing_tiers are PLAIN STRINGS like "Pro $12/seat: AI included" — '
     'NEVER nested objects (wrong example: {{"tier":"Pro","price":12}}). '
     'advantages = angles {company} can use AGAINST them, from the corpus only. '
     'Every source in "sources" must be a real URL from the corpus — never invent URLs. '
-    'ONLY JSON: {{"pricing_tiers":[],"recent_features":[],"positioning":"","advantages":[],"sources":[]}}'
+    '"competitor" must be exactly "{competitor}". '
+    'ONLY JSON: {{"competitor":"{competitor}","pricing_tiers":[],"recent_features":[],"positioning":"","advantages":[],"sources":[]}}'
 )
 
 
@@ -49,7 +60,15 @@ def run(competitors: list, emit, company: str = "") -> list[dict]:
     results = []
     for item in competitors:
         name = item if isinstance(item, str) else item.get("name", str(item))
-        intel = _process(name, company, emit)
+        try:
+            intel = _process(name, company, emit)
+        except Exception as e:
+            # Per-competitor guard: a search-chain crash or any unexpected error
+            # for ONE rival degrades only that rival to low_signal — it never
+            # raises out of run() and never drops the rest of the batch.
+            logger.warning("product: unhandled error for %s: %s", name, e)
+            emit("product", f"low signal: {name} · {type(e).__name__}")
+            intel = _low_signal(name)
         results.append(intel.model_dump())
     return results
 

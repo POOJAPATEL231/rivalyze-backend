@@ -1,7 +1,9 @@
-"""Contract smoke test — analyze → poll → completed, now against Postgres.
+"""Contract smoke test — analyze → poll → the awaiting_confirmation GATE.
 
-Runs are DB-backed (no in-memory JOBS), so this needs a database. It uses a
-unique company per run and deletes it (cascade) on teardown; skips if no DB.
+Two-phase pipeline: /analyze runs discovery only and parks at
+awaiting_confirmation (the full analyze → confirm → completed path lives in
+tests/contract/test_two_phase.py). DB-backed; unique company per run, cascade
+delete on teardown; skips if no DB.
 
 Run:  MOCK_MODE=1 python -m pytest tests/contract/test_smoke.py -q
 """
@@ -42,38 +44,32 @@ def test_health_is_open_and_shaped():
     assert r.json() == {"status": "ok", "service": "rivalyze"}
 
 
-def test_analyze_then_poll_completes_and_persists():
+def test_analyze_then_poll_reaches_gate_and_persists():
     r = client.post("/api/v1/analyze", json={"company": COMPANY, "domain": "testing"})
     assert r.status_code == 200
-    assert r.json()["status"] == "queued"
+    assert r.json()["status"] == "running_discovery"       # phase-1 status
     job_id = r.json()["job_id"]
 
     status = {}
     for _ in range(100):
         status = client.get(f"/api/v1/runs/{job_id}").json()
-        if status["status"] in ("completed", "failed"):
+        if status["status"] in ("awaiting_confirmation", "completed", "failed"):
             break
         time.sleep(0.1)
 
-    assert status["status"] == "completed"
-    assert status["run_id"]                       # the persisted run uuid
+    assert status["status"] == "awaiting_confirmation"      # parks at the gate
     names = [c["name"].lower() for c in status["result"]["competitors"]]
-    assert names, "expected at least one competitor"
-    assert COMPANY.lower() not in names           # self-exclusion
+    assert names, "expected at least one proposed competitor"
+    assert COMPANY.lower() not in names                     # self-exclusion
 
-    # prove it's actually in Postgres, not just the response
+    # prove the proposal is actually in Postgres, not just the response
     with connection.pool().connection() as c, c.cursor() as cur:
         cur.execute("SELECT status FROM runs WHERE job_id = %s", (job_id,))
-        assert cur.fetchone()[0] == "completed"
-        cur.execute("SELECT count(*) FROM competitors WHERE run_id = %s::uuid", (status["run_id"],))
+        assert cur.fetchone()[0] == "awaiting_confirmation"
+        cur.execute("SELECT r.id FROM runs r WHERE r.job_id = %s", (job_id,))
+        run_id = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM competitors WHERE run_id = %s", (run_id,))
         assert cur.fetchone()[0] == len(names)
-
-
-def test_persistence_first_returns_existing_completed():
-    # second analyze of the same company short-circuits to the completed run
-    r = client.post("/api/v1/analyze", json={"company": COMPANY, "domain": "testing"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "completed"
 
 
 def test_unknown_job_returns_404():

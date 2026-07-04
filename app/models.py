@@ -10,6 +10,7 @@ Two layers live here:
   2. API/run-lifecycle models — the request/response and poll shapes the frozen
      /api/v1 contract returns.
 """
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -176,20 +177,92 @@ class RunEvent(BaseModel):
 class RunStatus(BaseModel):
     """Poll shape for GET /api/v1/runs/{job_id}, polled every 2s by the UI.
 
-    In this vertical slice `result` holds the discovery CompetitorSet. In the
-    full pipeline the completed run persists a CompetitiveReport fetched via
-    GET /api/v1/reports/{run_id}; `run_id` is populated on completion so the
-    frontend can navigate to /dash/{run_id}.
+    Two-phase lifecycle (Rivalyze_TwoPhase_Pipeline.md):
+      queued -> running_discovery -> awaiting_confirmation -> confirmed ->
+      running_analysis -> completed | failed
+    At `awaiting_confirmation`, `result.competitors` is the PROPOSED rival set the
+    UI renders, edits, and posts back to /confirm. On `completed`, the persisted
+    CompetitiveReport is fetched via GET /api/v1/reports/{run_id}; `run_id` is
+    populated so the frontend can navigate to /dash/{run_id}.
+
+    `running` is retained only for backward-compatibility with rows written by the
+    earlier single-phase slice; new runs never use it.
     """
 
     job_id: str
-    status: Literal["queued", "running", "completed", "failed"]
+    status: Literal[
+        "queued", "running", "running_discovery", "awaiting_confirmation",
+        "confirmed", "running_analysis", "completed", "failed",
+    ]
     current_stage: str = "queued"
     events: list[RunEvent] = Field(default_factory=list)
     result: Optional[CompetitorSet] = None
     lane_stats: dict[str, int] = Field(default_factory=dict)
     run_id: Optional[str] = None
     error: Optional[str] = None
+
+
+class ConfirmRequest(BaseModel):
+    """POST /api/v1/runs/{job_id}/confirm — the "Deploy the agents" button.
+
+    The frontend sends the EDITED list (what the user kept after removing rivals);
+    Phase 2 analyzes EXACTLY this. min_length=1 makes an empty list a 422 for free.
+    """
+
+    confirmed_competitors: list[Competitor] = Field(min_length=1, max_length=8)
+
+
+class EvidenceResponse(BaseModel):
+    """GET /api/v1/evidence/{claim_ref}?run_id= — the citation drawer.
+
+    An empty `sources` list is a valid 200 (unknown claim_ref); a 404 is returned
+    only when the run_id itself is unknown.
+    """
+
+    claim_ref: str
+    sources: list[EvidenceRow] = Field(default_factory=list)
+
+
+class HistoryEntry(BaseModel):
+    """One row of GET /api/v1/history. threat_level/confidence are optional:
+    a completed run persisted before the strategist agent existed (or any
+    run finished via finish_run(job_id) with no report yet) has neither."""
+
+    job_id: str
+    company: str
+    threat_level: Optional[str] = None
+    confidence: Optional[float] = None
+    created_at: datetime
+
+
+class DeltaSignal(BaseModel):
+    """One NEW signal in GET /api/v1/companies/{slug}/delta.
+
+    `type` is a plain str (not the Signal Literal) on purpose: a historical row
+    with an unexpected type must never 500 a pure read endpoint."""
+
+    agent: str
+    competitor: str
+    type: str
+    headline: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ref: str  # f"{type}:{competitor.lower()}" — matches evidence claim_ref shape
+
+
+class DeltaResponse(BaseModel):
+    """GET /api/v1/companies/{slug}/delta — "what's new since last run".
+
+    Two 200 variants (route uses response_model_exclude_none so absent
+    optionals are dropped from the JSON):
+      - has a previous run: company + since + count + new_signals
+      - first/only run:     count=0, new_signals=[], first_run=true
+    """
+
+    count: int
+    new_signals: list[DeltaSignal] = Field(default_factory=list)
+    company: Optional[str] = None      # only when a previous run exists
+    since: Optional[datetime] = None   # previous run's finished_at (ISO 8601)
+    first_run: Optional[bool] = None   # true only for the 0-or-1-run case
 
 
 # ============================== auth (users) ==============================
