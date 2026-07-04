@@ -66,7 +66,10 @@ def _build_corpus(company: str, domain: str, month: str, emit) -> str:
     corpus = ""
     for q in (q1, q2):
         for r in search_mod.search(q, emit):
-            corpus += f"{r['title']}\n{r['content']}\nSOURCE: {r['url']}\n\n"
+            # defensive .get(): a search provider row missing a key must not
+            # raise here (discovery's contract is to never raise).
+            title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
+            corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
 
     return corpus[:6000]  # prompt budget cap (v2 §4.6)
 

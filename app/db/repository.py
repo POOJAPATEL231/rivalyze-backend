@@ -15,7 +15,10 @@ MS SQL -> Postgres notes are called out per function where behavior differs.
 """
 from __future__ import annotations
 
+import functools
 import re
+import uuid as _uuid
+from datetime import datetime as _datetime, timezone as _tz
 from typing import Optional
 
 from psycopg.rows import dict_row
@@ -40,6 +43,134 @@ def get_pool() -> ConnectionPool:
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     return slug or "company"
+
+
+# =========================== in-memory fallback ============================
+# When NO database is configured (connection.is_enabled() is False — local dev,
+# MOCK_MODE, offline, CI), the run lifecycle lives in these dicts instead of
+# Postgres, so the app is fully exercisable with zero infrastructure. Each
+# public function below is decorated with @_fallback("<method>"); the SQL body
+# is untouched and only runs when a real DB IS configured. Behaviour and return
+# shapes match the SQL paths.
+class _MemStore:
+    def __init__(self) -> None:
+        self.companies: dict = {}    # slug -> {id,name,slug,domain}
+        self.runs: dict = {}         # job_id -> run row dict
+        self.competitors: dict = {}  # run_id -> [ {name,category,rationale} ]
+        self.reports: dict = {}      # run_id -> {report, md_export}
+
+    def _company_name(self, company_id: str) -> str:
+        for c in self.companies.values():
+            if c["id"] == company_id:
+                return c["name"]
+        return ""
+
+    def create_company(self, name: str, domain: str = "") -> str:
+        slug = _slugify(name)
+        rec = self.companies.get(slug)
+        if rec is None:
+            rec = {"id": _uuid.uuid4().hex, "name": name, "slug": slug, "domain": domain or None}
+            self.companies[slug] = rec
+        else:
+            rec["name"], rec["domain"] = name, (domain or rec["domain"])
+        return rec["id"]
+
+    def create_run(self, job_id: str, company_id: str) -> str:
+        rid = _uuid.uuid4().hex
+        self.runs[job_id] = {
+            "id": rid, "job_id": job_id, "company_id": company_id,
+            "status": "queued", "current_stage": "queued",
+            "threat_level": None, "report_confidence": None, "error": None,
+            "events": [], "lane_stats": {},
+            "started_at": _datetime.now(_tz.utc), "finished_at": None,
+        }
+        return rid
+
+    def update_run_status(self, job_id: str, status: str, stage: str) -> None:
+        r = self.runs.get(job_id)
+        if r:
+            r["status"], r["current_stage"] = status, stage
+
+    def append_events(self, job_id: str, events: list[dict]) -> None:
+        r = self.runs.get(job_id)
+        if r:
+            r["events"].extend(events)
+
+    def set_lane_stats(self, job_id: str, stats: dict) -> None:
+        r = self.runs.get(job_id)
+        if r:
+            r["lane_stats"] = stats
+
+    def finish_run(self, job_id: str, threat=None, confidence=None) -> None:
+        r = self.runs.get(job_id)
+        if r:
+            r.update(status="completed", current_stage="done", threat_level=threat,
+                     report_confidence=confidence, finished_at=_datetime.now(_tz.utc))
+
+    def fail_run(self, job_id: str, error: str) -> None:
+        r = self.runs.get(job_id)
+        if r:
+            r.update(status="failed", error=error, finished_at=_datetime.now(_tz.utc))
+
+    def get_run(self, job_id: str):
+        r = self.runs.get(job_id)
+        return dict(r) if r else None
+
+    def save_competitors(self, run_id: str, rows: list[dict]) -> None:
+        if rows:
+            self.competitors.setdefault(run_id, []).extend(
+                {"name": x["name"], "category": x.get("category", "direct"),
+                 "rationale": x.get("rationale", "")} for x in rows)
+
+    def get_competitors(self, run_id: str) -> list[dict]:
+        return list(self.competitors.get(run_id, []))
+
+    def save_report(self, run_id: str, report: dict, md=None) -> str:
+        self.reports[run_id] = {"report": report, "md_export": md}
+        return _uuid.uuid4().hex
+
+    def get_report(self, run_id: str):
+        rec = self.reports.get(run_id)
+        return {"id": run_id, "run_id": run_id, "report": rec["report"],
+                "md_export": rec["md_export"], "created_at": None} if rec else None
+
+    def find_completed_report(self, company_name: str):
+        for r in reversed(list(self.runs.values())):
+            if r["status"] == "completed" and \
+                    self._company_name(r["company_id"]).lower() == company_name.lower():
+                return {"job_id": r["job_id"], "run_id": r["id"]}
+        return None
+
+    def get_history(self, limit: int = 20, company: str | None = None) -> list[dict]:
+        out: list[dict] = []
+        for r in reversed(list(self.runs.values())):
+            if r["status"] != "completed":
+                continue
+            name = self._company_name(r["company_id"])
+            if company and company.lower() not in name.lower():
+                continue
+            out.append({"job_id": r["job_id"], "company": name,
+                        "threat_level": r["threat_level"], "confidence": r["report_confidence"],
+                        "created_at": r["finished_at"] or r["started_at"]})
+            if len(out) >= limit:
+                break
+        return out
+
+
+_mem = _MemStore()
+
+
+def _fallback(method: str):
+    """Route to the in-memory store when no database is configured; otherwise
+    run the decorated SQL function unchanged."""
+    def deco(sql_fn):
+        @functools.wraps(sql_fn)
+        def wrapper(*args, **kwargs):
+            if not connection.is_enabled():
+                return getattr(_mem, method)(*args, **kwargs)
+            return sql_fn(*args, **kwargs)
+        return wrapper
+    return deco
 
 
 # ============================== companies ===============================
@@ -371,3 +502,17 @@ def get_search_cache(key: str) -> Optional[dict]:
             cur.execute(sql, (key,))
             row = cur.fetchone()
             return row[0] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Wire the in-memory fallback onto the run-lifecycle functions. Each keeps its
+# real SQL body (used when a DB is configured); when connection.is_enabled() is
+# False the call routes to the matching _MemStore method instead, so the whole
+# app runs locally / in MOCK with no Postgres. Signals/evidence/search_cache are
+# intentionally left DB-only — they aren't on the discovery-only run path, and
+# cache.py already degrades gracefully when the Postgres write-through is absent.
+for _fn_name in ("create_company", "create_run", "update_run_status", "append_events",
+                 "set_lane_stats", "finish_run", "fail_run", "get_run", "save_competitors",
+                 "get_competitors", "save_report", "get_report", "find_completed_report",
+                 "get_history"):
+    globals()[_fn_name] = _fallback(_fn_name)(globals()[_fn_name])

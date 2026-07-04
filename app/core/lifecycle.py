@@ -98,8 +98,17 @@ def _pipeline(job_id: str, run_id: str, req: AnalyzeRequest) -> None:
     try:
         repository.update_run_status(job_id, "running", "discovery")
         emit("system", f"run {job_id} started")
+        # idea-mode: resolve the free-text idea into a real (company, domain)
+        # BEFORE discovery, so an idea-only request doesn't search for an empty
+        # company. The pre-step never raises (heuristic fallback on LLM failure).
+        company, domain = req.company, req.domain
+        if (req.idea or "").strip() and not req.company.strip():
+            from ..agents.idea import idea_to_domain
+            resolved = idea_to_domain(req.idea, emit)
+            company, domain = resolved.company, (resolved.domain or domain)
+            emit("system", f'idea resolved · company="{company}" · domain="{domain}"')
         # discovery persists its competitors via the repository using run_id
-        discovery.run(req.company, req.domain, run_id, emit)
+        discovery.run(company, domain, run_id, emit)
         repository.set_lane_stats(job_id, {**lane_stats,
                                            "searches": search_mod.stats["searches"],
                                            "cache_hits": search_mod.stats["cache_hits"]})

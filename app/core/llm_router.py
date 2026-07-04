@@ -26,18 +26,30 @@ MOCK = os.getenv("MOCK_MODE", "0") == "1"
 
 # Lane order per task class. Cheap/fast lanes first for extraction,
 # strong lanes first for reasoning. Lanes without a key are skipped.
+# Lane order per task class — the router fails over lane-to-lane on
+# 429/timeout/parse/4xx, so listing a provider twice with different models gives
+# model-to-model fallback for free (if the first model errors, the next is tried).
+# NOTE: Cerebras model ids are account/plan-specific — `llama-3.3-70b` 404s on
+# plans that don't include it. `gpt-oss-120b` / `zai-glm-4.7` are broadly
+# available and both do clean JSON extraction. Override any model without a code
+# change via env: e.g. CEREBRAS_MODEL, GROQ_EXTRACT_MODEL (see _model()).
+def _model(env_name: str, default: str) -> str:
+    return os.getenv(env_name, default)
+
+
 LANES = {
     "extract": [
-        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       "llama-3.1-8b-instant"),
-        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-2.5-flash"),
-        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   "llama-3.3-70b"),
-        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", "meta-llama/llama-3.3-70b-instruct:free"),
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_EXTRACT_MODEL", "llama-3.1-8b-instant")),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash")),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b")),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL_ALT", "zai-glm-4.7")),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_EXTRACT_MODEL", "meta-llama/llama-3.3-70b-instruct:free")),
     ],
     "reason": [
-        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-2.5-flash"),
-        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   "llama-3.3-70b"),
-        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       "llama-3.3-70b-versatile"),
-        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", "deepseek/deepseek-chat-v3.1:free"),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash")),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b")),
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_REASON_MODEL", "llama-3.3-70b-versatile")),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_REASON_MODEL", "deepseek/deepseek-chat-v3.1:free")),
     ],
 }
 ATTEMPTS_PER_LANE = 2
