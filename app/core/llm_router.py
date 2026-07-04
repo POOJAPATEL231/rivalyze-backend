@@ -1,93 +1,119 @@
-"""LLM router — STUB.
+"""4-lane LLM router. ONE code path, four configs — every lane speaks the
+OpenAI chat-completions dialect (Gemini via its /openai compatibility base).
 
-Owner: Mihir (full impl is Phase 2 of execution_plan.md, Sat 13:00–15:00 +
-17:30–18:30). This stub exists so the review agent (Phase 3) can import the
-FROZEN interface and run end-to-end against the no-backend path.
+Behavior (per the v2 plan §4.6):
+  task_class -> ordered lane list -> attempt -> on 429/timeout/parse-failure,
+  reactive backoff honoring Retry-After, then FAIL OVER to the next lane.
+  No blind sleeps. Structured output is validated with Pydantic; a parse
+  failure triggers one JSON-repair pass, then lane failover.
 
-Frozen signature (from mihir_task_overview.md §Key Interfaces):
-    complete(
-        task_class: Literal["extract", "reason"],
-        prompt: str,
-        schema: type[BaseModel],
-        emit: Callable[[dict], None],
-    ) -> tuple[BaseModel, str]
+MOCK_MODE=1 short-circuits to a deterministic offline lane so the whole
+slice runs with zero keys (Saturday 10:00 wiring check).
 
-When Phase 2 ships, the real `complete` replaces this definition. Callers
-(agents) do not need to change.
-
-Behaviour in the stub:
-    - No API keys configured: raise RuntimeError("all lanes exhausted").
-      The review agent's outer try/except converts this to low_signal.
-    - MOCK_MODE=1: build a default instance of the requested schema and
-      return it on lane "mock". Useful for smoke tests and the demo.
+Base ported from the POC vertical slice. Mihir hardens this in place
+(budgets, lane_stats accounting, demo-reserve switch) — same signature.
 """
-
-from __future__ import annotations
-
-import logging
+import json
 import os
-from typing import Callable, Literal, TypeVar
+import random
+import re
+import time
 
-from pydantic import BaseModel
+import httpx
+from pydantic import BaseModel, ValidationError
 
-logger = logging.getLogger(__name__)
+MOCK = os.getenv("MOCK_MODE", "0") == "1"
 
-T = TypeVar("T", bound=BaseModel)
+# Lane order per task class. Cheap/fast lanes first for extraction,
+# strong lanes first for reasoning. Lanes without a key are skipped.
+LANES = {
+    "extract": [
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       "llama-3.1-8b-instant"),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-2.5-flash"),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   "llama-3.3-70b"),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", "meta-llama/llama-3.3-70b-instruct:free"),
+    ],
+    "reason": [
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-2.5-flash"),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   "llama-3.3-70b"),
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       "llama-3.3-70b-versatile"),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", "deepseek/deepseek-chat-v3.1:free"),
+    ],
+}
+ATTEMPTS_PER_LANE = 2
+TIMEOUT = 45.0
 
-_TASK_CLASSES = ("extract", "reason")
+
+def _repair_json(text: str) -> str:
+    """Defensive parse sequence from the lessons doc: strip fences, then
+    take the outermost JSON object."""
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    return m.group(0) if m else text
 
 
-def complete(
-    task_class: Literal["extract", "reason"],
-    prompt: str,
-    schema: type[T],
-    emit: Callable[[dict], None] | None = None,
-) -> tuple[T, str]:
-    """STUB: return a default schema instance when MOCK_MODE=1; else raise.
+def _mock_completion(prompt: str) -> str:
+    """Deterministic offline lane. Sniffs the task from the prompt."""
+    if "competitors" in prompt.lower():
+        company = "the company"
+        m = re.search(r"competitors of (.+?) in", prompt)
+        if m:
+            company = m.group(1).strip()
+        seed = {"Notion": ["Coda", "ClickUp", "Slite", "Obsidian"],
+                "Zomato": ["Swiggy", "Zepto", "EatSure", "magicpin"]}
+        names = seed.get(company, ["Rival One", "Rival Two", "Rival Three", "Rival Four"])
+        return json.dumps({"competitors": [
+            {"name": n, "category": "direct" if i < 3 else "indirect",
+             "rationale": f"Overlapping buyer and jobs-to-be-done with {company} (mock)"}
+            for i, n in enumerate(names)]})
+    return json.dumps({"answer": "mock"})
 
-    Phase 2 replaces this with the lane-ordered httpx calls, backoff,
-    JSON repair, budget enforcement, and demo-reserve key resolution
-    described in execution_plan.md Phase 2.
-    """
-    if task_class not in _TASK_CLASSES:
-        raise ValueError(f"task_class must be one of {_TASK_CLASSES}, got {task_class!r}")
 
-    mock_mode = os.getenv("MOCK_MODE", "0") == "1"
-    if mock_mode:
-        # Build a zero-content instance of the requested schema.
-        # The review agent's _flatten_complaint + low_signal guards
-        # will turn the empty result into something sensible for tests.
-        try:
-            instance = schema.model_construct()  # bypass validation — fields default
-        except Exception:
-            # Some schemas (e.g. with required competitor field) need *something*.
-            kwargs = {}
-            if "competitor" in schema.model_fields:
-                kwargs["competitor"] = ""
-            instance = schema.model_construct(**kwargs)
-        # Best-effort: if the schema has a `competitor` field and the
-        # prompt mentions "{competitor} customer complaints problems MONTH",
-        # lift the name out so the mock looks like a real extraction.
-        if "competitor" in schema.model_fields:
+def complete(task_class: str, prompt: str, schema: type[BaseModel],
+             emit=lambda agent, msg: None):
+    """Returns (validated_model, lane_name). Raises RuntimeError only if
+    every configured lane is exhausted — callers convert that into a
+    typed low_signal result, never a raw error to the user."""
+    if MOCK:
+        emit("router", "MOCK_MODE lane · deterministic completion")
+        return schema.model_validate_json(_mock_completion(prompt)), "mock"
+
+    lanes = [lane for lane in LANES[task_class] if os.getenv(lane[2])]
+    if not lanes:
+        raise RuntimeError("no LLM lane configured — set at least one *_API_KEY")
+
+    last_err = "unknown"
+    for name, base, key_env, model in lanes:
+        for attempt in range(1, ATTEMPTS_PER_LANE + 1):
             try:
-                import re
-                m = re.search(r"complaints about ([A-Z][\w& .'-]{1,40})", prompt)
-                if m:
-                    object.__setattr__(instance, "competitor", m.group(1).strip())
-            except Exception:
-                pass
-        if emit is not None:
-            try:
-                emit({"agent": "router", "msg": f"router-stub · mock complete: {schema.__name__}"})
-            except Exception:
-                pass
-        return instance, "mock"
-
-    # No backend wired up — match Phase 2's "all lanes exhausted" behaviour
-    # so callers' except branches (review agent) degrade to low_signal.
-    if emit is not None:
-        try:
-            emit({"agent": "router", "msg": "router-stub · no lanes configured (set MOCK_MODE=1)"})
-        except Exception:
-            pass
-    raise RuntimeError("all lanes exhausted (router stub: no MOCK_MODE, no API keys)")
+                emit("router", f"{name}/{model} · attempt {attempt}")
+                r = httpx.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {os.environ[key_env]}"},
+                    json={"model": model, "temperature": 0.1,
+                          "response_format": {"type": "json_object"},
+                          "messages": [
+                              {"role": "system",
+                               "content": "Reply with a single JSON object only. No prose, no code fences."},
+                              {"role": "user", "content": prompt}]},
+                    timeout=TIMEOUT)
+                if r.status_code == 429:
+                    wait = float(r.headers.get("retry-after", 0) or 0)
+                    wait = min(wait or (1.5 ** attempt + random.random()), 8.0)
+                    emit("router", f"{name} 429 · backoff {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                raw = r.json()["choices"][0]["message"]["content"]
+                try:
+                    return schema.model_validate_json(_repair_json(raw)), name
+                except ValidationError as ve:
+                    last_err = f"{name} schema-fail: {ve.errors()[0]['msg']}"
+                    emit("router", f"{name} parse failed · failing over")
+                    break  # parse failure -> next lane, don't retry same lane
+            except httpx.HTTPError as e:
+                last_err = f"{name}: {e}"
+                emit("router", f"{name} error · {type(e).__name__}")
+                time.sleep(min(1.5 ** attempt, 4.0))
+        # lane exhausted -> next
+    raise RuntimeError(f"all lanes exhausted · last: {last_err}")
