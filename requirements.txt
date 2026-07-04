@@ -9,7 +9,9 @@ email-validator>=2.1      # backs pydantic EmailStr
 psycopg[binary,pool]>=3.2 # Postgres driver + connection pool
 slowapi>=0.1.9            # rate limiting on auth endpoints
 redis>=5.0               # optional: Redis-backed rate-limit storage (REDIS_URL)
+beautifulsoup4>=4.12      # search_chain.py direct-scrape step
+lxml>=5.0                 # faster BS4 parser; html.parser also works as fallback
 # dev / test:
 pytest>=8.0
-# optional search fallback:
-# ddgs
+respx>=0.21                # mocks httpx in tests (search_chain, etc.)
+# NOTE: ddgs is banned by spec for search_chain.py — do not re-add.

@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 .pytest_cache/
 warmup_manifest.json
+project_understanding/
