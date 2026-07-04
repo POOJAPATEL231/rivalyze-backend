@@ -42,6 +42,16 @@ JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 # Refresh tokens are long-lived and revocable (stored hashed in refresh_tokens).
 REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
+# --- rate limiting (auth endpoints, keyed by client IP) ---
+# Throttles online brute-force / credential-stuffing that bcrypt alone can't stop.
+# Redis-backed when REDIS_URL is set (limits survive restarts + are shared across
+# workers); otherwise in-process memory. Disable in tests via RATE_LIMIT_ENABLED=0.
+RATE_LIMIT_ENABLED: bool = _flag("RATE_LIMIT_ENABLED", "1")
+RATE_LIMIT_STORAGE_URI: str = os.getenv("RATELIMIT_STORAGE_URI") or (REDIS_URL or "memory://")
+AUTH_RATELIMIT_SIGNUP: str = os.getenv("RATELIMIT_SIGNUP", "5/minute")
+AUTH_RATELIMIT_LOGIN: str = os.getenv("RATELIMIT_LOGIN", "10/minute")
+AUTH_RATELIMIT_REFRESH: str = os.getenv("RATELIMIT_REFRESH", "10/minute")
+
 if JWT_SECRET_IS_EPHEMERAL:
     log.warning(
         "JWT_SECRET not set — using an ephemeral per-process secret. Tokens will "

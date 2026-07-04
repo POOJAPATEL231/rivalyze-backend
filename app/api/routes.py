@@ -22,8 +22,12 @@ router = APIRouter(prefix="/api/v1")
 def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
     if not req.company.strip() and not (req.idea or "").strip():
         raise HTTPException(status_code=422, detail="provide a company or an idea")
-    # TODO (persistence-first re-run): when the repository lands, short-circuit
-    # here if find_completed_report(slug) hits -> return existing job_id/completed.
+    # persistence-first: if this company already has a completed run, hand it
+    # back instantly — zero pipeline, zero credits.
+    if req.company.strip():
+        existing = lifecycle.find_completed(req.company)
+        if existing:
+            return AnalyzeResponse(job_id=existing, status="completed")
     return lifecycle.start_run(req, background_tasks)
 
 

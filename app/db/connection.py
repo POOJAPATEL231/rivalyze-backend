@@ -6,8 +6,10 @@ checked in order:
   2. PG* env vars  — PGHOST/PGUSER/PGPASSWORD/PGDATABASE/PGPORT, read by libpq
                      directly (how you're connecting from the shell right now)
 
-When NEITHER is set, is_enabled() is False and callers fall back to their
-in-memory path — so offline/MOCK dev and the test suite need no database.
+A database is REQUIRED — auth (users + refresh tokens) persists only to
+Postgres, with no in-memory fallback. If neither DATABASE_URL nor PG* is set,
+pool() raises. is_enabled() is exposed so tests can skip cleanly when no DB is
+configured rather than erroring.
 
 This is a thin connection helper, NOT the repository. Dharvi's
 app/db/repository.py owns the runs/reports/evidence function set; this module
@@ -34,8 +36,8 @@ def _conninfo() -> Optional[str]:
 
 
 def is_enabled() -> bool:
-    """True when a database is configured. Callers use this to decide between
-    the Postgres path and their in-memory fallback."""
+    """True when a database is configured (DATABASE_URL or PG* env). Used by
+    tests to skip when no DB is available; the app itself requires one."""
     return _conninfo() is not None
 
 

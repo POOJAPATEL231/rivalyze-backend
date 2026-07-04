@@ -17,10 +17,11 @@ Token model:
 Security posture (unchanged from before): bcrypt password hashes, generic login
 error + dummy verify (no user enumeration / timing leak), normalized emails.
 """
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from ..core import refresh_store, security, user_store
+from ..core import config, refresh_store, security, user_store
 from ..core.auth import get_current_user
+from ..core.ratelimit import limiter
 from ..models import (
     LoginRequest,
     RefreshRequest,
@@ -44,16 +45,23 @@ def _issue_tokens(user_id: str, email: str) -> TokenResponse:
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=201)
-def signup(req: SignupRequest) -> TokenResponse:
+@limiter.limit(config.AUTH_RATELIMIT_SIGNUP)
+def signup(request: Request, req: SignupRequest) -> TokenResponse:
     email = req.email.lower().strip()
+    # fast path: friendly 409 without hashing when the email obviously exists
     if user_store.get_user_by_email(email) is not None:
         raise HTTPException(status_code=409, detail="email already registered")
-    user = user_store.create_user(email, security.hash_password(req.password))
+    try:
+        user = user_store.create_user(email, security.hash_password(req.password))
+    except user_store.EmailAlreadyExistsError:
+        # lost the race with a concurrent signup — same 409, never a 500 (TOCTOU)
+        raise HTTPException(status_code=409, detail="email already registered")
     return _issue_tokens(user["id"], email)
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest) -> TokenResponse:
+@limiter.limit(config.AUTH_RATELIMIT_LOGIN)
+def login(request: Request, req: LoginRequest) -> TokenResponse:
     email = req.email.lower().strip()
     user = user_store.get_user_by_email(email)
     if user is None:
@@ -65,7 +73,8 @@ def login(req: LoginRequest) -> TokenResponse:
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(req: RefreshRequest) -> TokenResponse:
+@limiter.limit(config.AUTH_RATELIMIT_REFRESH)
+def refresh(request: Request, req: RefreshRequest) -> TokenResponse:
     token_hash = security.hash_refresh_token(req.refresh_token)
     rec = refresh_store.get(token_hash)
     if rec is None:

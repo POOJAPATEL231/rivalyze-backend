@@ -15,12 +15,20 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from .api.auth_routes import router as auth_router
 from .api.routes import router as api_router
 from .core import config
+from .core.ratelimit import limiter
 
 app = FastAPI(title="Rivalyze", version="0.1")
+
+# rate limiting: register the shared limiter + the 429 handler (slowapi looks
+# these up on app.state). Per-route caps live on the auth endpoints.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
