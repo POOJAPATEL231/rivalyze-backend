@@ -207,6 +207,18 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                     last_err = f"{name} schema-fail: {ve.errors()[0]['msg']}"
                     emit("router", f"{name} parse failed · failing over")
                     break  # parse failure -> next lane, don't retry same lane
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                last_err = f"{name}: HTTP {code}"
+                if code < 500:
+                    # Client error (bad request/param, bad auth) — retrying the
+                    # identical request won't help, so fail over immediately with
+                    # a clear code. A 400 here is most likely a rejected param
+                    # (e.g. reasoning_effort), NOT an outage — surface it as such.
+                    emit("router", f"{name} HTTP {code} · client error · failing over")
+                    break
+                emit("router", f"{name} HTTP {code} · server error · retrying")
+                time.sleep(min(1.5 ** attempt, 4.0))
             except httpx.HTTPError as e:
                 last_err = f"{name}: {e}"
                 emit("router", f"{name} error · {type(e).__name__}")
