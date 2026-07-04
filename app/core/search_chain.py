@@ -17,8 +17,10 @@ behavior is preserved unchanged since other agents may rely on MOCK_MODE for
 local dev without hitting real APIs.
 """
 import hashlib
+import ipaddress
 import logging
 import os
+import socket
 import urllib.robotparser
 from urllib.parse import urlparse
 
@@ -179,15 +181,32 @@ def _extract_domain(query: str) -> str | None:
     return None
 
 
+def _is_public(host: str) -> bool:
+    """Reject hosts that resolve to private/loopback/link-local/reserved/
+    multicast IPs, so a scrape target can't be pointed at internal
+    infrastructure (e.g. cloud metadata, localhost, RFC1918 ranges)."""
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _robots_allows(url: str) -> bool:
     """Check robots.txt before scraping. Fails OPEN (returns True) if
     robots.txt itself is unreachable/malformed — per spec this is
     intentional: an unreachable robots.txt should not block a scrape."""
     parsed = urlparse(url)
+    if not _is_public(parsed.netloc):
+        return False
     rp = urllib.robotparser.RobotFileParser()
-    rp.set_url(f"{parsed.scheme}://{parsed.netloc}/robots.txt")
     try:
-        rp.read()
+        r = httpx.get(f"{parsed.scheme}://{parsed.netloc}/robots.txt",
+                      headers={"User-Agent": _UA}, timeout=5.0, follow_redirects=False)
+        rp.parse(r.text.splitlines())
         return rp.can_fetch(_UA, url)
     except Exception:
         return True
@@ -197,26 +216,24 @@ def _scrape(url: str, emit) -> list[dict] | None:
     """Direct scrape of a competitor's own site. Checks robots.txt first,
     never follows redirects off the original domain, strips nav/script/
     style/header/footer tags, and caps content at 2000 chars per spec."""
-    # QUESTION: bs4 (BeautifulSoup) + lxml aren't currently in
-    # requirements.txt (also noticed requirements.txt has an unresolved git
-    # merge-conflict marker block around the redis/dotenv/pytest lines —
-    # flagging that separately, did not touch it here). Import is local so
-    # a missing package degrades to "scrape step unavailable" instead of
-    # crashing the whole module at import time.
     try:
         from bs4 import BeautifulSoup
     except ImportError:
         emit("search", "bs4 not installed · skipping scrape")
         return None
 
+    allowed_host = urlparse(url).netloc
+    if not _is_public(allowed_host):
+        emit("search", f"{allowed_host} resolves to a non-public address · skipping")
+        return None
+
     if not _robots_allows(url):
         emit("search", f"robots.txt disallows {url} · skipping")
         return None
 
-    allowed_host = urlparse(url).netloc
     try:
         emit("search", f"scraping {url}")
-        r = httpx.get(url, headers={"User-Agent": _UA}, timeout=8.0, follow_redirects=True)
+        r = httpx.get(url, headers={"User-Agent": _UA}, timeout=8.0, follow_redirects=False)
         r.raise_for_status()
         # Never follow links off the original domain — if a redirect
         # landed us somewhere else, treat that as a failed scrape rather
