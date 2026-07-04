@@ -30,12 +30,18 @@ router = APIRouter(prefix="/api/v1")
 
 
 @router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
-def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks,
+            refresh: bool = Query(False, description="force a fresh two-phase run even if a "
+                                  "report exists — use when the user wants to re-pick rivals")) -> AnalyzeResponse:
     if not req.company.strip() and not (req.idea or "").strip():
         raise HTTPException(status_code=422, detail="provide a company or an idea")
-    # persistence-first: if this company already has a completed report, hand it
-    # back instantly — zero pipeline, zero credits (skips BOTH phases).
-    if req.company.strip():
+    # persistence-first: if this company already has a POPULATED report, hand it back
+    # instantly — zero pipeline, zero credits (skips BOTH phases). Skipped when
+    # refresh=true, because the stored report is tied to the competitor set chosen
+    # LAST time: a user who analyzed 2 rivals and now wants 4 must re-run phase 1 and
+    # re-select, not be handed the old 2-rival report. The 24h search cache still
+    # spares the credits for any rival that overlaps the previous run.
+    if req.company.strip() and not refresh:
         existing = lifecycle.find_completed(req.company)
         if existing:
             return AnalyzeResponse(job_id=existing, status="completed")
