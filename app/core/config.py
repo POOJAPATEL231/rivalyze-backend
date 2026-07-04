@@ -23,7 +23,15 @@ DEMO_RESERVE: bool = _flag("DEMO_RESERVE")  # 1 = hold budget back for the live 
 
 # --- API surface ---
 BEARER_TOKEN: str = os.getenv("BEARER_TOKEN", "")            # empty = auth open (dev)
-FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+# Allowed browser origins for CORS. Default "*" = allow any origin, so the UI
+# works from Chrome without pinning a URL. Can be narrowed later to a
+# comma-separated allowlist, e.g. "http://localhost:5173,https://rivalyze.example"
+# (no trailing slashes — the browser's Origin header has no path).
+FRONTEND_ORIGINS: list[str] = [
+    o.strip().rstrip("/") for o in os.getenv("FRONTEND_ORIGIN", "*").split(",") if o.strip()
+]
+# kept for any single-origin references
+FRONTEND_ORIGIN: str = FRONTEND_ORIGINS[0] if FRONTEND_ORIGINS else "*"
 
 # --- persistence (wired in when Dharvi's repository lands) ---
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")

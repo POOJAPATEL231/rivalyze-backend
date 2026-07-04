@@ -30,10 +30,14 @@ app = FastAPI(title="Rivalyze", version="0.1")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# CORS. "*" allows any origin (browser Bearer auth still works — it's a header,
+# not a cookie/credential). Wildcard origin + credentials is spec-invalid, so
+# credentials are disabled only in the wildcard case.
+_allow_all_origins = "*" in config.FRONTEND_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[config.FRONTEND_ORIGIN],
-    allow_credentials=True,
+    allow_origins=["*"] if _allow_all_origins else config.FRONTEND_ORIGINS,
+    allow_credentials=not _allow_all_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
