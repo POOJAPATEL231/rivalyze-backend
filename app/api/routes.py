@@ -91,3 +91,67 @@ def get_evidence_endpoint(claim_ref: str, run_id: str = Query(...)) -> EvidenceR
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "rivalyze"}
+
+
+@router.get("/health/cache")
+def health_cache() -> dict:
+    """Live cache diagnostic — runs INSIDE the deployment, so it reports the real
+    REDIS_URL / DATABASE_URL that only exist in App Service config (not in the repo
+    or a local .env). Leaks NO secret values: only the url scheme, booleans, and a
+    verdict. Never raises — every check is guarded so /health/cache itself is safe."""
+    import os
+
+    out: dict = {"redis": {}, "postgres": {}, "roundtrip": {}}
+
+    # --- Redis hot layer ---
+    redis_url = os.getenv("REDIS_URL", "")
+    scheme = redis_url.split("://", 1)[0] if "://" in redis_url else ""
+    valid_scheme = scheme in ("redis", "rediss", "unix")
+    out["redis"] = {"configured": bool(redis_url), "scheme": scheme or None,
+                    "valid_scheme": valid_scheme, "ping": None}
+    if redis_url and valid_scheme:
+        try:
+            import redis as _redis
+            out["redis"]["ping"] = bool(
+                _redis.Redis.from_url(redis_url, socket_timeout=5,
+                                      decode_responses=True).ping())
+        except Exception as exc:  # noqa: BLE001
+            out["redis"]["ping"] = False
+            out["redis"]["error"] = type(exc).__name__
+    elif redis_url and not valid_scheme:
+        out["redis"]["error"] = "REDIS_URL has no scheme (needs rediss://…) — silently disabled"
+
+    # --- Postgres write-through fallback ---
+    pg_configured = bool(os.getenv("DATABASE_URL") or os.getenv("PGHOST"))
+    out["postgres"] = {"configured": pg_configured, "search_cache_table": None}
+    if pg_configured:
+        try:
+            with repository.get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.search_cache')")
+                    out["postgres"]["search_cache_table"] = cur.fetchone()[0] is not None
+        except Exception as exc:  # noqa: BLE001
+            out["postgres"]["search_cache_table"] = False
+            out["postgres"]["error"] = type(exc).__name__
+
+    # --- real set→get through the app's own cache module ---
+    try:
+        from ..core import cache
+        key = cache.make_cache_key("__health_cache_probe__")
+        cache.cache_set(key, {"probe": "ok"})
+        got = cache.cache_get(key)
+        out["roundtrip"]["ok"] = bool(got and got.get("probe") == "ok")
+    except Exception as exc:  # noqa: BLE001
+        out["roundtrip"] = {"ok": False, "error": type(exc).__name__}
+
+    redis_ok = out["redis"].get("ping") is True
+    pg_ok = out["postgres"].get("search_cache_table") is True
+    if redis_ok:
+        verdict = "redis_active"
+    elif pg_ok:
+        verdict = "postgres_only_active"
+    else:
+        verdict = "no_working_cache"
+    out["verdict"] = verdict
+    out["cache_working"] = redis_ok or pg_ok
+    return out
