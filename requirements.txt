@@ -3,6 +3,9 @@ uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
 python-dotenv>=1.0        # optional: loads .env at startup
+# secrets (prod): source from Azure Key Vault when AZURE_KEY_VAULT_URL is set
+azure-identity>=1.17
+azure-keyvault-secrets>=4.8
 # dev / test:
 pytest>=8.0
 # optional search fallback:

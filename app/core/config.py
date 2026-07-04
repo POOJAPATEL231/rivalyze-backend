@@ -24,3 +24,8 @@ FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 # --- persistence (wired in when Dharvi's repository lands) ---
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 REDIS_URL: str = os.getenv("REDIS_URL", "")
+
+# --- secret source ---
+# When set, app/__init__.py has already hydrated os.environ from this Key Vault
+# (before this module was imported), so the values above may originate there.
+AZURE_KEY_VAULT_URL: str = os.getenv("AZURE_KEY_VAULT_URL", "")
