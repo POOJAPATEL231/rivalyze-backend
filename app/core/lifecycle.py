@@ -142,7 +142,16 @@ def start_discovery(job_id: str, run_id: str, req: AnalyzeRequest) -> None:
         emit("system", f"run {job_id} · discovery started")
         state = {"company": req.company, "domain": req.domain,
                  "idea": req.idea, "run_id": run_id}
-        orchestrator.run_discovery(state, _agents(), emit)
+        final_state = orchestrator.run_discovery(state, _agents(), emit)
+        # Idea mode: discovery resolved a real company/domain from the idea, but the
+        # company row still holds the raw idea sentence. Persist the resolved identity
+        # so Phase 2 (which re-reads the company from Postgres) stamps the report with
+        # the company name, not the whole idea paragraph.
+        if (req.idea or "").strip() and not (req.company or "").strip():
+            resolved = (final_state or {}).get("company")
+            if resolved and resolved.strip() and resolved.strip() != (req.idea or "").strip():
+                repository.set_run_company(run_id, resolved.strip(),
+                                           (final_state or {}).get("domain") or "")
         _persist_lane_stats(job_id, lane_stats)
         repository.update_run_status(job_id, "awaiting_confirmation", "awaiting_confirmation")
         emit("system", f"discovery complete in {time.time() - t0:.1f}s · awaiting confirmation")

@@ -6,7 +6,8 @@
 These use the in-memory repository (no DATABASE_URL in the test env)."""
 from app.core import lifecycle
 from app.db import repository
-from app.models import CompetitiveReport
+from app.db.repository import _MemStore
+from app.models import AnalyzeRequest, CompetitiveReport
 
 
 def test_degraded_report_shell_is_valid_and_carries_findings():
@@ -41,3 +42,21 @@ def test_completed_run_not_flipped_to_failed_by_bookkeeping(monkeypatch):
     row = repository.get_run("book-job-1")
     assert row["status"] == "completed"                            # NOT failed
     assert repository.get_report(rid) is not None                  # report persisted
+
+
+def test_set_run_company_updates_the_name():
+    m = _MemStore()
+    cid = m.create_company("an app for dog walkers to schedule and take payment", "")
+    rid = m.create_run("j", cid)
+    m.set_run_company(rid, "PackWalk", "pet services")
+    assert m.get_run_company(rid)["name"] == "PackWalk"
+
+
+def test_idea_mode_persists_resolved_company_not_raw_idea():
+    idea_text = "an app that helps dog walkers schedule visits and take payments online"
+    cid = repository.create_company(idea_text, "")     # phase 1 stores the raw idea as name
+    rid = repository.create_run("idea-job-1", cid)
+    req = AnalyzeRequest(company="", domain="", idea=idea_text)
+    lifecycle.start_discovery("idea-job-1", rid, req)  # MOCK resolves + persists
+    name = repository.get_run_company(rid)["name"]
+    assert name and name != idea_text                  # the report won't be stamped with the raw idea

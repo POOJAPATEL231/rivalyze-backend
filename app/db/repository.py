@@ -187,6 +187,14 @@ class _MemStore:
         c = self._company(r["company_id"]) or {}
         return {"name": c.get("name", ""), "domain": c.get("domain")}
 
+    def set_run_company(self, run_id: str, name: str, domain: str = "") -> None:
+        r = self._run_by_id(run_id)
+        if not r:
+            return
+        c = self._company(r["company_id"])
+        if c:
+            c["name"], c["domain"] = name, (domain or c.get("domain"))
+
     def run_id_exists(self, run_id: str) -> bool:
         return self._run_by_id(run_id) is not None
 
@@ -442,6 +450,19 @@ def get_run_company(run_id: str) -> Optional[dict]:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, (run_id,))
             return cur.fetchone()
+
+
+def set_run_company(run_id: str, name: str, domain: str = "") -> None:
+    """Update a run's company name/domain. Used to persist the idea-mode-resolved
+    identity in Phase 1, so Phase 2 (which re-reads the company from Postgres) stamps
+    the report with the resolved company name, not the raw idea sentence."""
+    sql = """
+        UPDATE companies SET name = %s, domain = %s
+        WHERE id = (SELECT company_id FROM runs WHERE id::text = %s)
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (name, domain or None, run_id))
 
 
 def get_competitors(run_id: str) -> list[dict]:
@@ -707,7 +728,7 @@ def get_search_cache(key: str) -> Optional[dict]:
 for _fn_name in ("create_company", "create_run", "update_run_status", "append_events",
                  "set_lane_stats", "finish_run", "fail_run", "get_run", "save_competitors",
                  "get_competitors", "save_report", "get_report", "find_completed_report",
-                 "get_history", "confirm_run", "get_run_company", "run_id_exists",
-                 "replace_competitors", "save_signal", "save_evidence", "get_evidence",
-                 "get_evidence_by_ids"):
+                 "get_history", "confirm_run", "get_run_company", "set_run_company",
+                 "run_id_exists", "replace_competitors", "save_signal", "save_evidence",
+                 "get_evidence", "get_evidence_by_ids"):
     globals()[_fn_name] = _fallback(_fn_name)(globals()[_fn_name])
