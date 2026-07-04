@@ -578,22 +578,25 @@ def find_completed_report(company_name: str) -> Optional[dict]:
     MS SQL note: `lower(name) = lower(%s)` hits the `companies(lower(name))` unique
     index; the reports join is on the unique run_id, so this stays a cheap seek.
     """
-    # jarr(path) -> array length, or 0 if the value is missing/null/not an array.
-    # CASE guarantees jsonb_array_length is only called on a real array, so a
-    # malformed legacy row can never raise here.
-    def _jarr(expr: str) -> str:
-        return (f"CASE WHEN jsonb_typeof({expr}) = 'array' "
-                f"THEN jsonb_array_length({expr}) ELSE 0 END")
-    sql = f"""
+    # Each CASE guarantees jsonb_array_length is only called on a real array, so a
+    # malformed legacy row can never raise. Written as a plain (non-f) string literal
+    # — the paths are fixed, nothing is interpolated — so there is no injection surface.
+    sql = """
         SELECT r.job_id, r.id::text AS run_id
         FROM runs r
         JOIN companies c ON c.id = r.company_id
         JOIN reports rep ON rep.run_id = r.id
         WHERE lower(c.name) = lower(%s) AND r.status = 'completed'
-          AND ( {_jarr("rep.report->'recommendations'")} > 0
-             OR {_jarr("rep.report->'head_to_head'")} > 0
-             OR {_jarr("rep.report->'opportunities'")} > 0
-             OR {_jarr("rep.report->'swot'->'strengths'")} > 0 )
+          AND (
+            CASE WHEN jsonb_typeof(rep.report->'recommendations') = 'array'
+                 THEN jsonb_array_length(rep.report->'recommendations') ELSE 0 END > 0
+            OR CASE WHEN jsonb_typeof(rep.report->'head_to_head') = 'array'
+                 THEN jsonb_array_length(rep.report->'head_to_head') ELSE 0 END > 0
+            OR CASE WHEN jsonb_typeof(rep.report->'opportunities') = 'array'
+                 THEN jsonb_array_length(rep.report->'opportunities') ELSE 0 END > 0
+            OR CASE WHEN jsonb_typeof(rep.report->'swot'->'strengths') = 'array'
+                 THEN jsonb_array_length(rep.report->'swot'->'strengths') ELSE 0 END > 0
+          )
         ORDER BY r.finished_at DESC NULLS LAST
         LIMIT 1
     """
@@ -708,12 +711,14 @@ def save_search_cache(key: str, value: dict) -> None:
 
 def get_search_cache(key: str) -> Optional[dict]:
     """Postgres-side cache read — the fallback when Redis misses or is down. Ignores
-    rows older than _SEARCH_CACHE_MAX_AGE so stale results are never served forever."""
-    sql = (f"SELECT value FROM search_cache "
-           f"WHERE key = %s AND created_at > now() - interval '{_SEARCH_CACHE_MAX_AGE}'")
+    rows older than _SEARCH_CACHE_MAX_AGE so stale results are never served forever.
+    The max-age is a BOUND PARAMETER (cast to interval), not string-formatted, so
+    there is no injection surface."""
+    sql = ("SELECT value FROM search_cache "
+           "WHERE key = %s AND created_at > now() - %s::interval")
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (key,))
+            cur.execute(sql, (key, _SEARCH_CACHE_MAX_AGE))
             row = cur.fetchone()
             return row[0] if row else None
 
