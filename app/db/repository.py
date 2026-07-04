@@ -149,7 +149,12 @@ class _MemStore:
         for r in reversed(list(self.runs.values())):
             if r["status"] == "completed" and \
                     self._company_name(r["company_id"]).lower() == company_name.lower():
-                return {"job_id": r["job_id"], "run_id": r["id"]}
+                # Skip empty/degraded reports (parity with the SQL version) so a
+                # blank early run isn't served forever on re-analyze.
+                rep = (self.reports.get(r["id"]) or {}).get("report") or {}
+                if (rep.get("recommendations") or rep.get("head_to_head")
+                        or rep.get("opportunities") or (rep.get("swot") or {}).get("strengths")):
+                    return {"job_id": r["job_id"], "run_id": r["id"]}
         return None
 
     def get_history(self, limit: int = 20, company: str | None = None) -> list[dict]:
@@ -538,18 +543,36 @@ def get_evidence_by_ids(evidence_ids: list[str]) -> list[dict]:
 
 # ============================ persistence-first ============================
 def find_completed_report(company_name: str) -> Optional[dict]:
-    """Case-insensitive company match -> most recent completed run, or None.
+    """Case-insensitive company match -> most recent completed run WITH A POPULATED
+    report, or None.
 
-    Backs the "already analyzed this?" short-circuit in POST /analyze.
-    MS SQL note: `lower(name) = lower(%s)` is our ILIKE-equivalent exact match;
-    it hits the `companies(lower(name))` unique index, so this is a single
-    index seek plus a `runs(company_id, status)` seek — well under 50ms.
+    Backs the "already analyzed this?" short-circuit in POST /analyze. It MUST skip
+    empty/degraded reports: a run that completed but produced an empty report (an
+    early build before the report fixes, or a rate-limit-degraded run) would
+    otherwise be served forever, so re-analyzing the company returns blank arrays
+    instead of re-running the working pipeline. We require the report to carry real
+    content (recommendations OR head_to_head OR opportunities OR swot); if the most
+    recent completed run is empty we fall through to a fresh run.
+
+    MS SQL note: `lower(name) = lower(%s)` hits the `companies(lower(name))` unique
+    index; the reports join is on the unique run_id, so this stays a cheap seek.
     """
-    sql = """
+    # jarr(path) -> array length, or 0 if the value is missing/null/not an array.
+    # CASE guarantees jsonb_array_length is only called on a real array, so a
+    # malformed legacy row can never raise here.
+    def _jarr(expr: str) -> str:
+        return (f"CASE WHEN jsonb_typeof({expr}) = 'array' "
+                f"THEN jsonb_array_length({expr}) ELSE 0 END")
+    sql = f"""
         SELECT r.job_id, r.id::text AS run_id
         FROM runs r
         JOIN companies c ON c.id = r.company_id
+        JOIN reports rep ON rep.run_id = r.id
         WHERE lower(c.name) = lower(%s) AND r.status = 'completed'
+          AND ( {_jarr("rep.report->'recommendations'")} > 0
+             OR {_jarr("rep.report->'head_to_head'")} > 0
+             OR {_jarr("rep.report->'opportunities'")} > 0
+             OR {_jarr("rep.report->'swot'->'strengths'")} > 0 )
         ORDER BY r.finished_at DESC NULLS LAST
         LIMIT 1
     """
@@ -557,6 +580,51 @@ def find_completed_report(company_name: str) -> Optional[dict]:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, (company_name,))
             return cur.fetchone()
+
+
+# ============================ monitor delta reads ============================
+# Pure DB reads backing GET /api/v1/companies/{slug}/delta (no AI, no credits).
+# DB-only on purpose — signals never had an in-memory fallback, so the delta
+# doesn't either.
+def get_company_by_slug(slug: str) -> Optional[dict]:
+    """Company row by its unique slug, or None. Backs the delta route's 404."""
+    sql = "SELECT id::text, name, slug FROM companies WHERE slug = %s"
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (slug,))
+            return cur.fetchone()
+
+
+def get_latest_completed_runs(company_id: str, limit: int = 2) -> list[dict]:
+    """Newest-first completed runs for one company (default: the two the delta
+    compares). Hits ix_runs_company_status; NULLS LAST keeps legacy completed
+    rows without a finished_at from masquerading as the latest run."""
+    sql = """
+        SELECT id::text, finished_at
+        FROM runs
+        WHERE company_id = %s::uuid AND status = 'completed'
+        ORDER BY finished_at DESC NULLS LAST
+        LIMIT %s
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (company_id, limit))
+            return cur.fetchall()
+
+
+def get_signals_for_run(run_id: str) -> list[dict]:
+    """All signals of one run (hits ix_signals_run). payload/evidence_ids are
+    jsonb — psycopg hands them back as Python dict/list already."""
+    sql = """
+        SELECT id::text, agent, competitor, type, payload, evidence_ids
+        FROM signals
+        WHERE run_id = %s::uuid
+        ORDER BY created_at, id
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (run_id,))
+            return cur.fetchall()
 
 
 _HISTORY_BASE = """
