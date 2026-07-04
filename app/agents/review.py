@@ -62,6 +62,15 @@ _SENTIMENT_VALUES: tuple[Literal["POSITIVE", "NEUTRAL", "NEGATIVE"], ...] = (
 
 # System prompt — kept verbatim from docs/llm_prompts.md §REVIEWS, with
 # explicit anti-nesting examples added so weak models don't return objects.
+#
+# NOTE (Tushar): same bug as product.py's _SYSTEM — the example JSON used to
+# omit "competitor", which SentimentIntel requires. MOCK_MODE never caught it
+# because the mock lane always injects a "competitor" placeholder regardless
+# of the prompt; a real Gemini call follows the example literally, omits the
+# key, and fails validation with "Field required" -> every competitor
+# degrades to low_signal. `_sanitise()` re-stamps `competitor` with the
+# caller's known-good name after validation anyway, so accuracy here doesn't
+# matter, only presence.
 _SYSTEM_PROMPT = """Mine customer complaints about {competitor} from the corpus
 (reviews, Reddit, forums, app stores).
 
@@ -78,8 +87,10 @@ other values. Default NEUTRAL if corpus is mixed.
 
 sources: ONLY URLs that actually appear in the corpus above. Never invent.
 
+"competitor" must be exactly "{competitor}".
+
 Return ONLY JSON (no markdown fences, no commentary):
-{{"top_complaints":[],"opportunity_gaps":[],"overall_sentiment":"NEUTRAL","sources":[]}}"""
+{{"competitor":"{competitor}","top_complaints":[],"opportunity_gaps":[],"overall_sentiment":"NEUTRAL","sources":[]}}"""
 
 
 # ---------- public API ----------
