@@ -59,3 +59,48 @@ def test_concentric_corpus_no_location_starts_global(monkeypatch):
     prof = CompanyProfile(name="Acme")                         # blank location
     discovery._concentric_corpus("Acme", "widgets", prof, "July 2026", _noop)
     assert len(seen) == 1                                       # only the global tier, no invented place
+
+
+def test_resolve_profile_thin_search_stays_blank(monkeypatch):
+    monkeypatch.setattr(discovery.search_mod, "search", lambda q, e: [])
+    p = discovery._resolve_profile("Acme", "widgets", "July 2026", _noop)
+    assert p.location.city == "" and p.location.country == ""   # NEVER invents a location
+    assert p.name == "Acme"
+
+
+def test_resolve_profile_never_raises(monkeypatch):
+    monkeypatch.setattr(discovery.search_mod, "search",
+                        lambda q, e: [{"title": "t", "content": "x" * 400, "url": "http://x"}])
+
+    def boom(*a, **k):
+        raise RuntimeError("all lanes exhausted")
+    monkeypatch.setattr(discovery.llm_router, "complete", boom)
+    p = discovery._resolve_profile("Acme", "widgets", "July 2026", _noop)
+    assert p.name == "Acme" and p.location.country == ""        # degrades blank, no crash
+
+
+def test_concentric_dedups_urls_across_tiers(monkeypatch):
+    # every tier returns the SAME url -> counted once, so it keeps widening to global
+    monkeypatch.setattr(discovery.search_mod, "search",
+                        lambda q, e: [{"title": "t", "content": "c", "url": "http://same"}])
+    monkeypatch.setattr(config, "CONCENTRIC_MIN_RESULTS", 4)
+    prof = CompanyProfile(name="Acme", location=GeoLocation(city="A", region="B", country="C"))
+    corpus = discovery._concentric_corpus("Acme", "w", prof, "July 2026", _noop)
+    assert corpus.count("SOURCE: http://same") == 1            # same url across tiers counted once
+    assert "[city:A]" in corpus                                 # kept at the CLOSEST tier it appeared
+
+
+def test_concentric_region_equal_city_is_skipped(monkeypatch):
+    seen = []
+    monkeypatch.setattr(discovery.search_mod, "search", lambda q, e: (seen.append(q), [])[1])
+    prof = CompanyProfile(name="Acme", location=GeoLocation(city="Pune", region="pune", country="India"))
+    discovery._concentric_corpus("Acme", "w", prof, "July 2026", _noop)
+    assert len(seen) == 3                                       # city + country + global (region == city, skipped)
+
+
+def test_min_corpus_guard_applies_in_concentric(monkeypatch):
+    # flag on, but search finds nothing anywhere -> degrade to EMPTY, never fabricate rivals
+    monkeypatch.setattr(config, "CONCENTRIC_DISCOVERY", True)
+    monkeypatch.setattr(discovery.search_mod, "search", lambda q, e: [])
+    out = discovery.run("Acme", "widgets", "t", _noop)
+    assert out.competitors == []
