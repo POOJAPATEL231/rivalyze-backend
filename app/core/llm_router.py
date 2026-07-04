@@ -166,6 +166,11 @@ def _mock_completion(prompt: str) -> str:
         # report_eval scoring (reason lane) — return plausible scores offline.
         return json.dumps({"completeness": 8, "accuracy": 7, "strategic_value": 8,
                            "actionability": 7, "overall_score": 7.5})
+    if "extract WHERE" in prompt:
+        # discovery concentric profile — a deterministic grounded-looking location so
+        # MOCK exercises the full city -> region -> country tiering.
+        return json.dumps({"city": "Bengaluru", "region": "Karnataka",
+                           "country": "India", "size": "mid"})
     if "competitors" in prompt.lower():
         company = "the company"
         m = re.search(r"competitors of (.+?) in", prompt)

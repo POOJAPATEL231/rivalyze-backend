@@ -31,6 +31,27 @@ class CompetitorSet(BaseModel):
     competitors: list[Competitor] = Field(default_factory=list, max_length=4)
 
 
+# ======================= domain: company/idea profile =======================
+class GeoLocation(BaseModel):
+    """Where a business operates, tightest to widest — drives concentric rival search
+    (city -> region -> country -> global). Any level may be blank when the evidence
+    (company mode) or the user (idea mode) doesn't provide it; a blank level is simply
+    skipped when widening the radius, so we never search a made-up place."""
+    city: str = Field(default="", max_length=120)
+    region: str = Field(default="", max_length=120)     # state / province
+    country: str = Field(default="", max_length=120)
+
+
+class CompanyProfile(BaseModel):
+    """The profile that drives closest-rival discovery — DERIVED from search in
+    company mode, COLLECTED from the user in idea mode. Same shape either way, so one
+    discovery engine serves both."""
+    name: str = Field(default="", max_length=200)
+    location: GeoLocation = Field(default_factory=GeoLocation)
+    size: str = Field(default="", max_length=60)        # "small" / "mid" / "large" / "~50 employees"
+    category: str = Field(default="", max_length=200)   # the market / vertical
+
+
 # ============================== domain: news ==============================
 class NewsItem(BaseModel):
     event: str
