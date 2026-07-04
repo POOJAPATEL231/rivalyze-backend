@@ -4,16 +4,21 @@ Two levels, deliberately separate:
 
   require_token      — service-level gate on the /api/v1 contract routes.
                        Accepts EITHER the static env BEARER_TOKEN (compared in
-                       constant time) OR a valid user JWT. Stays dev-open only
-                       when no BEARER_TOKEN is configured, so the offline MOCK
-                       slice keeps working; once a token is set the gate is real.
+                       constant time) OR a valid user JWT.
 
   get_current_user   — strict: identifies the caller. Always requires a valid,
                        unexpired user JWT whose subject maps to a known user.
                        Used by routes that act as a specific user (e.g. /me).
 
+Fail-closed posture: an empty BEARER_TOKEN only serves the surface OPEN when the
+run is explicitly offline/dev (MOCK_MODE) or the operator opted out with
+AUTH_DISABLED=1. In any other configuration a missing credential returns 503
+rather than silently disabling auth — so a deploy that forgets to inject the
+secret refuses to serve a credit-spending, data-returning endpoint open.
+
 401s carry `WWW-Authenticate: Bearer` per RFC 6750. Errors are generic — they
-never reveal whether a token was absent, malformed, expired, or unknown.
+never reveal whether a token was absent, malformed, expired, or unknown. Token
+compares are constant-time to avoid leaking the secret via response timing.
 """
 import secrets
 from typing import Optional
@@ -48,9 +53,14 @@ def require_token(authorization: Optional[str] = Header(default=None)) -> None:
         except Exception:
             pass  # fall through
 
-    # 3) dev-open ONLY when there is no service token to check against
+    # 3) no valid credential presented
     if not config.BEARER_TOKEN:
-        return
+        # Open ONLY when explicitly offline/dev; otherwise fail CLOSED so a
+        # misconfigured deploy never serves the surface unauthenticated.
+        if config.MOCK_MODE or config.AUTH_DISABLED:
+            return
+        raise HTTPException(status_code=503, detail="server auth is not configured",
+                            headers=_UNAUTH)
 
     raise HTTPException(status_code=401, detail="invalid or missing bearer token",
                         headers=_UNAUTH)

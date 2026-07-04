@@ -8,6 +8,8 @@ restart loses nothing; the frontend polls the run straight from the database.
 Exceptions inside the task are caught and turned into status=failed + an event;
 the poller NEVER sees a 500 and never a stack trace.
 """
+import logging
+import re
 import time
 import uuid
 
@@ -19,9 +21,14 @@ from ..core import search_chain as search_mod
 from ..db import repository
 from ..models import AnalyzeRequest, AnalyzeResponse, RunStatus
 
+logger = logging.getLogger(__name__)
+
 
 def _slug(text: str) -> str:
-    return text.lower().strip().replace(" ", "-")[:24] or "idea"
+    # Keep only url/path/log-safe chars — never let raw user text (spaces,
+    # slashes, control chars) leak into the job_id.
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:24] or "idea"
 
 
 def find_completed(company: str) -> str | None:
@@ -69,6 +76,9 @@ def _pipeline(job_id: str, run_id: str, req: AnalyzeRequest) -> None:
                                            "cache_hits": search_mod.stats["cache_hits"]})
         repository.finish_run(job_id, "completed")
         emit("system", f"completed in {time.time() - t0:.1f}s")
-    except Exception as e:  # belt-and-braces: still never a raw 500 to the poller
-        repository.finish_run(job_id, "failed", str(e))
-        emit("system", f"failed: {e}")
+    except Exception:  # belt-and-braces: still never a raw 500 to the poller
+        # Log the full detail server-side; persist only a generic, user-safe line
+        # (schema.sql documents runs.error as "one line, user-safe" — enforce it).
+        logger.exception("pipeline %s failed", job_id)
+        repository.finish_run(job_id, "failed", "internal pipeline error")
+        emit("system", "failed: internal error")

@@ -46,10 +46,14 @@ TIMEOUT = 45.0
 
 def _repair_json(text: str) -> str:
     """Defensive parse sequence from the lessons doc: strip fences, then
-    take the outermost JSON object."""
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    return m.group(0) if m else text
+    take the outermost JSON object. Uses find/rfind slicing (linear) instead of
+    a greedy DOTALL regex, and caps length, to avoid pathological backtracking
+    on a large/unbalanced model response."""
+    text = re.sub(r"```(?:json)?", "", text).strip()[:100_000]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
 
 
 def _mock_completion(prompt: str) -> str:
@@ -124,6 +128,7 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                     f"{base}/chat/completions",
                     headers={"Authorization": f"Bearer {os.environ[key_env]}"},
                     json={"model": model, "temperature": 0.1,
+                          "max_tokens": 1024,  # bound response size/latency/cost
                           "response_format": {"type": "json_object"},
                           "messages": [
                               {"role": "system",
