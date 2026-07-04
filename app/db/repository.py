@@ -58,12 +58,23 @@ class _MemStore:
         self.runs: dict = {}         # job_id -> run row dict
         self.competitors: dict = {}  # run_id -> [ {name,category,rationale} ]
         self.reports: dict = {}      # run_id -> {report, md_export}
+        self.evidence: list = []     # evidence rows
+        self.signals: list = []      # signal rows
 
     def _company_name(self, company_id: str) -> str:
+        return (self._company(company_id) or {}).get("name", "")
+
+    def _company(self, company_id: str):
         for c in self.companies.values():
             if c["id"] == company_id:
-                return c["name"]
-        return ""
+                return c
+        return None
+
+    def _run_by_id(self, run_id: str):
+        for r in self.runs.values():
+            if r["id"] == run_id:
+                return r
+        return None
 
     def create_company(self, name: str, domain: str = "") -> str:
         slug = _slugify(name)
@@ -155,6 +166,46 @@ class _MemStore:
             if len(out) >= limit:
                 break
         return out
+
+    # ---- two-phase (confirm + analysis + evidence) ----
+    def confirm_run(self, job_id: str):
+        r = self.runs.get(job_id)
+        if r and r["status"] == "awaiting_confirmation":
+            r["status"], r["current_stage"] = "confirmed", "confirmed"
+            return r["id"]
+        return None
+
+    def get_run_company(self, run_id: str):
+        r = self._run_by_id(run_id)
+        if not r:
+            return None
+        c = self._company(r["company_id"]) or {}
+        return {"name": c.get("name", ""), "domain": c.get("domain")}
+
+    def run_id_exists(self, run_id: str) -> bool:
+        return self._run_by_id(run_id) is not None
+
+    def replace_competitors(self, run_id: str, rows: list[dict]) -> None:
+        self.competitors[run_id] = [
+            {"name": x["name"], "category": x.get("category", "direct"),
+             "rationale": x.get("rationale", "")} for x in rows]
+
+    def save_signal(self, sig: dict) -> str:
+        sid = _uuid.uuid4().hex
+        self.signals.append({**sig, "id": sid})
+        return sid
+
+    def save_evidence(self, row: dict) -> None:
+        if not any(e.get("id") == row.get("id") for e in self.evidence):  # ON CONFLICT DO NOTHING
+            self.evidence.append(dict(row))
+
+    def get_evidence(self, run_id: str, claim_ref: str) -> list[dict]:
+        return [e for e in self.evidence
+                if e.get("run_id") == run_id and e.get("claim_ref") == claim_ref]
+
+    def get_evidence_by_ids(self, evidence_ids: list[str]) -> list[dict]:
+        by_id = {e["id"]: e for e in self.evidence if "id" in e}
+        return [by_id[i] for i in evidence_ids if i in by_id]
 
 
 _mem = _MemStore()
@@ -569,14 +620,16 @@ def get_search_cache(key: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Wire the in-memory fallback onto the run-lifecycle functions. Each keeps its
-# real SQL body (used when a DB is configured); when connection.is_enabled() is
-# False the call routes to the matching _MemStore method instead, so the whole
-# app runs locally / in MOCK with no Postgres. Signals/evidence/search_cache are
-# intentionally left DB-only — they aren't on the discovery-only run path, and
-# cache.py already degrades gracefully when the Postgres write-through is absent.
+# Wire the in-memory fallback onto the run-lifecycle + two-phase functions. Each
+# keeps its real SQL body (used when a DB is configured); when
+# connection.is_enabled() is False the call routes to the matching _MemStore
+# method instead, so the WHOLE app — both phases, /confirm, and the evidence
+# drawer — runs locally / in MOCK with no Postgres. search_cache is left DB-only
+# on purpose: cache.py already degrades gracefully when it's absent.
 for _fn_name in ("create_company", "create_run", "update_run_status", "append_events",
                  "set_lane_stats", "finish_run", "fail_run", "get_run", "save_competitors",
                  "get_competitors", "save_report", "get_report", "find_completed_report",
-                 "get_history"):
+                 "get_history", "confirm_run", "get_run_company", "run_id_exists",
+                 "replace_competitors", "save_signal", "save_evidence", "get_evidence",
+                 "get_evidence_by_ids"):
     globals()[_fn_name] = _fallback(_fn_name)(globals()[_fn_name])
