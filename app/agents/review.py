@@ -5,9 +5,9 @@ Spec: docs/llm_prompts.md §REVIEWS (Agent 2)
 Output: list[SentimentIntel]   — one entry per competitor, always populated.
 
 Contract (frozen Sat 11:00):
-    async def run(
+    def run(
         competitors: list[str],
-        emit: Callable[[dict], None],
+        emit: Callable[[str, str], None],
         company: str = "our company",
     ) -> list[SentimentIntel]
 
@@ -24,7 +24,7 @@ Anti-nesting guard:
     into a plain string so the Dashboard never renders "[object Object]".
 
 Module contract: imports from app.core.{search_chain, llm_router, cache}
-and app.db.models.SentimentIntel. The cache module is consumed only
+and app.models.SentimentIntel. The cache module is consumed only
 opportunistically (corpus-key memoisation) — its absence is non-fatal.
 """
 
@@ -36,7 +36,7 @@ from typing import Callable, Literal
 
 from app.core.llm_router import complete
 from app.core.search_chain import search
-from app.db.models import SentimentIntel
+from app.models import SentimentIntel
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +84,9 @@ Return ONLY JSON (no markdown fences, no commentary):
 
 # ---------- public API ----------
 
-async def run(
+def run(
     competitors: list[str],
-    emit: Callable[[dict], None],
+    emit: Callable[[str, str], None],
     company: str = "our company",
 ) -> list[SentimentIntel]:
     """Mine complaints and sentiment for each competitor.
@@ -104,10 +104,10 @@ async def run(
 
     for competitor in competitors:
         try:
-            result = await _run_single(competitor, company, emit)
+            result = _run_single(competitor, company, emit)
         except Exception as exc:  # last-resort safety net — caller always gets a row
             logger.error("reviews · unhandled error for %s: %s", competitor, exc)
-            _safe_emit(emit, {"agent": "reviews", "msg": f"reviews · error for {competitor}: {exc}"})
+            _safe_emit(emit, "reviews", f"reviews · error for {competitor}: {exc}")
             result = SentimentIntel(competitor=competitor, low_signal=True)
         results.append(result)
 
@@ -116,10 +116,10 @@ async def run(
 
 # ---------- internals ----------
 
-async def _run_single(
+def _run_single(
     competitor: str,
     company: str,
-    emit: Callable[[dict], None],
+    emit: Callable[[str, str], None],
 ) -> SentimentIntel:
     """Process a single competitor. May raise — caller wraps in try/except."""
 
@@ -130,9 +130,9 @@ async def _run_single(
         f"{competitor} negative reviews reddit {MONTH}",
     ):
         try:
-            hits = await search(query, emit)
+            hits = search(query, emit)
         except Exception as exc:
-            _safe_emit(emit, {"agent": "reviews", "msg": f"reviews · search fail ({competitor}): {exc}"})
+            _safe_emit(emit, "reviews", f"reviews · search fail ({competitor}): {exc}")
             hits = []
         if hits:
             raw_results.extend(hits)
@@ -142,7 +142,7 @@ async def _run_single(
 
     # 3. Low-signal guard — too little text means any extraction would be a guess.
     if not raw_results or len(corpus) < LOW_SIGNAL_CORPUS_CHARS:
-        _safe_emit(emit, {"agent": "reviews", "msg": f"reviews · low signal: {competitor}"})
+        _safe_emit(emit, "reviews", f"reviews · low signal: {competitor}")
         return SentimentIntel(competitor=competitor, low_signal=True)
 
     # 4. LLM extraction via the hardened router.
@@ -155,7 +155,7 @@ async def _run_single(
     except Exception as exc:
         # All lanes exhausted, JSON-repair failed, schema mismatch, etc.
         # The plan says callers convert this to low_signal.
-        _safe_emit(emit, {"agent": "reviews", "msg": f"reviews · llm fail ({competitor}): {exc}"})
+        _safe_emit(emit, "reviews", f"reviews · llm fail ({competitor}): {exc}")
         return SentimentIntel(competitor=competitor, low_signal=True)
 
     # 5. Sanitise the model output — these guards are the difference between
@@ -250,11 +250,17 @@ def _flatten_complaint(complaint) -> str:
     return str(complaint)
 
 
-def _safe_emit(emit: Callable[[dict], None] | None, event: dict) -> None:
-    """Emit an event without ever raising — the agent must keep going."""
+def _safe_emit(emit: Callable[[str, str], None] | None, agent: str, msg: str) -> None:
+    """Emit an event without ever raising — the agent must keep going.
+
+    Args:
+        emit: Emitter function that takes (agent: str, msg: str)
+        agent: Identifier for the emitting component (e.g., "reviews")
+        msg: Message to emit
+    """
     if emit is None:
         return
     try:
-        emit(event)
+        emit(agent, msg)
     except Exception:  # noqa: BLE001 — last-line defence
-        logger.debug("emit sink rejected event %r", event)
+        logger.debug("emit sink rejected event %r", (agent, msg))

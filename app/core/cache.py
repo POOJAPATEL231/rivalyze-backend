@@ -156,5 +156,5 @@ def _upstash_set(key: str, value: dict, ttl: int, emit: Callable | None) -> None
 
 def _emit_event(emit: Callable | None, msg: str) -> None:
     if emit:
-        emit({"agent": "cache", "msg": msg})
+        emit("cache", msg)
     logger.debug(msg)
