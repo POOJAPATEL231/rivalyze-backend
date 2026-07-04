@@ -20,9 +20,12 @@ def _flag(name: str, default: str = "0") -> bool:
 # --- run mode ---
 MOCK_MODE: bool = _flag("MOCK_MODE")        # 1 = deterministic offline lanes, zero keys
 DEMO_RESERVE: bool = _flag("DEMO_RESERVE")  # 1 = hold budget back for the live demo
+AUTH_DISABLED: bool = _flag("AUTH_DISABLED")  # 1 = explicit dev opt-out for auth (never in prod)
 
 # --- API surface ---
-BEARER_TOKEN: str = os.getenv("BEARER_TOKEN", "")            # empty = auth open (dev)
+# Empty token is only allowed to serve open when MOCK_MODE or AUTH_DISABLED is set;
+# otherwise auth fails CLOSED (see core/auth.py) so a misconfigured deploy can't run open.
+BEARER_TOKEN: str = os.getenv("BEARER_TOKEN", "")
 FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 
 # --- persistence (wired in when Dharvi's repository lands) ---
