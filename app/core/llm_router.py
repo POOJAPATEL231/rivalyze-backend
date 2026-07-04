@@ -57,7 +57,18 @@ def _repair_json(text: str) -> str:
 
 
 def _mock_completion(prompt: str) -> str:
-    """Deterministic offline lane. Sniffs the task from the prompt."""
+    """Deterministic offline lane. Sniffs the task from the prompt.
+
+    NOTE (Tushar): added the "pricing_tiers" branch below. Previously this
+    only handled discovery-shaped prompts ("competitors" in prompt) and fell
+    through to `{"answer": "mock"}` for everything else — including
+    product.py's extraction prompts, which need pricing_tiers/
+    recent_features/positioning/advantages/sources to satisfy ProductIntel.
+    That fallback doesn't validate against ProductIntel, so MOCK_MODE runs
+    of the product agent crashed with a pydantic ValidationError. Flagging
+    since this file is owned by Mihir — happy to hand off if you want a
+    different mock shape.
+    """
     if "competitors" in prompt.lower():
         company = "the company"
         m = re.search(r"competitors of (.+?) in", prompt)
@@ -70,6 +81,19 @@ def _mock_completion(prompt: str) -> str:
             {"name": n, "category": "direct" if i < 3 else "indirect",
              "rationale": f"Overlapping buyer and jobs-to-be-done with {company} (mock)"}
             for i, n in enumerate(names)]})
+    if "pricing_tiers" in prompt:
+        # "competitor" is required by ProductIntel even though product.py
+        # re-stamps it with the caller's known-good name after validation —
+        # validation itself happens before that stamp, so this placeholder
+        # just needs to satisfy the schema, not be accurate.
+        return json.dumps({
+            "competitor": "mock",
+            "pricing_tiers": ["Pro $12/seat: AI included (mock)"],
+            "recent_features": ["AI formulas v2 (mock)"],
+            "positioning": "docs-as-apps for power teams (mock)",
+            "advantages": ["cheaper at small team size (mock)"],
+            "sources": ["https://example.com/mock-source"],
+        })
     return json.dumps({"answer": "mock"})
 
 
@@ -80,7 +104,16 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
     typed low_signal result, never a raw error to the user."""
     if MOCK:
         emit("router", "MOCK_MODE lane · deterministic completion")
-        return schema.model_validate_json(_mock_completion(prompt)), "mock"
+        # NOTE (Tushar): the real-API path below already wraps schema
+        # validation in try/except and converts a mismatch into lane
+        # failover / RuntimeError. This mock path used to call
+        # model_validate_json() unguarded, so any future schema this mock
+        # doesn't know how to fake would raise a raw ValidationError
+        # instead of the RuntimeError callers (e.g. product.py) expect.
+        try:
+            return schema.model_validate_json(_mock_completion(prompt)), "mock"
+        except ValidationError as ve:
+            raise RuntimeError(f"mock lane schema-fail: {ve.errors()[0]['msg']}")
 
     lanes = [lane for lane in LANES[task_class] if os.getenv(lane[2])]
     if not lanes:
