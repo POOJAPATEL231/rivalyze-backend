@@ -3,6 +3,8 @@ uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
 python-dotenv>=1.0        # optional: loads .env at startup
+psycopg[binary]>=3.2      
+psycopg-pool>=3.2
 # dev / test:
 pytest>=8.0
 # optional search fallback:
