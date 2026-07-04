@@ -6,14 +6,14 @@ Two-phase pipeline (Rivalyze_TwoPhase_Pipeline.md):
   POST /api/v1/runs/{id}/confirm  (auth) -> {job_id, status:"confirmed"} — the "Deploy the agents" button
   GET  /api/v1/reports/{run_id}   (auth) -> the full CompetitiveReport
   GET  /api/v1/evidence/{ref}     (auth) -> {claim_ref, sources[]} — the citation drawer
-  GET  /api/v1/history            (auth) -> completed runs, newest first
-  GET  /api/v1/reports/{id}/export(auth) -> text/markdown attachment
   GET  /api/v1/health             (open) -> {status:"ok", service:"rivalyze"}
+
+GET /history and GET /reports/{id}/export live in app/api/history_routes.py
+(Dharvi's router), registered alongside this one in main.py.
 """
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse
 
-from ..core import export, lifecycle
+from ..core import lifecycle
 from ..core.auth import require_token
 from ..db import repository
 from ..models import (
@@ -23,7 +23,6 @@ from ..models import (
     ConfirmRequest,
     EvidenceResponse,
     EvidenceRow,
-    HistoryRow,
     RunStatus,
 )
 
@@ -87,39 +86,6 @@ def get_evidence_endpoint(claim_ref: str, run_id: str = Query(...)) -> EvidenceR
     rows = repository.get_evidence(run_id, claim_ref)
     return EvidenceResponse(claim_ref=claim_ref,
                             sources=[EvidenceRow.model_validate(r) for r in rows])
-
-
-@router.get("/history", response_model=list[HistoryRow], dependencies=[Depends(require_token)])
-def get_history_endpoint(company: str | None = Query(default=None)) -> list[HistoryRow]:
-    rows = repository.get_history(company=company)
-    return [
-        HistoryRow(
-            job_id=r["job_id"],
-            company=r["company"],
-            threat_level=r["threat_level"],
-            confidence=float(r["confidence"]) if r["confidence"] is not None else None,
-            created_at=r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
-        )
-        for r in rows
-    ]
-
-
-@router.get("/reports/{run_id}/export", dependencies=[Depends(require_token)])
-def export_report(run_id: str, format: str = Query(default="md")) -> PlainTextResponse:
-    if format != "md":
-        raise HTTPException(status_code=422, detail="unsupported format (only 'md')")
-    row = repository.get_report(run_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="report not found")
-    report = CompetitiveReport.model_validate(row["report"])
-    if row.get("md_export"):
-        md = row["md_export"]
-    else:
-        md = export.report_to_markdown(report)
-    return PlainTextResponse(
-        md, media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="rivalyze-{run_id}.md"'},
-    )
 
 
 @router.get("/health")

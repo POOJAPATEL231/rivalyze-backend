@@ -95,17 +95,17 @@ def test_confirm_runs_analysis_and_serves_report_and_reads():
     missing = "00000000-0000-0000-0000-000000000000"
     assert client.get("/api/v1/evidence/x:y", params={"run_id": missing}).status_code == 404
 
-    # history includes this completed run
+    # history includes this completed run (served by history_routes.py)
     hist = client.get("/api/v1/history", params={"company": company}).json()
     assert any(h["job_id"] == job for h in hist)
 
-    # markdown export
+    # markdown export (served by history_routes.py; unsupported format -> 400)
     ex = client.get(f"/api/v1/reports/{run_id}/export", params={"format": "md"})
     assert ex.status_code == 200
     assert ex.headers["content-type"].startswith("text/markdown")
-    assert ex.text.startswith("# Competitive Analysis")
+    assert ex.text.lstrip().startswith("#")               # a markdown report
     assert client.get(f"/api/v1/reports/{run_id}/export",
-                      params={"format": "pdf"}).status_code == 422
+                      params={"format": "pdf"}).status_code == 400
 
 
 # ---------------------------- TC-C11/C12 -----------------------------

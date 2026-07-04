@@ -21,6 +21,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from .api.auth_routes import router as auth_router
+from .api.history_routes import router as history_router
 from .api.routes import router as api_router
 from .core import config
 from .core.ratelimit import limiter
@@ -68,6 +69,7 @@ async def security_headers(request: Request, call_next):
 
 app.include_router(api_router)
 app.include_router(auth_router)
+app.include_router(history_router)
 
 _INDEX = Path(__file__).resolve().parent.parent / "static" / "index.html"
 

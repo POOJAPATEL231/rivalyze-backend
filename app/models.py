@@ -10,6 +10,7 @@ Two layers live here:
   2. API/run-lifecycle models — the request/response and poll shapes the frozen
      /api/v1 contract returns.
 """
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -211,16 +212,6 @@ class ConfirmRequest(BaseModel):
     confirmed_competitors: list[Competitor] = Field(min_length=1, max_length=8)
 
 
-class HistoryRow(BaseModel):
-    """One row of GET /api/v1/history — completed runs, newest first."""
-
-    job_id: str
-    company: str
-    threat_level: Optional[str] = None
-    confidence: Optional[float] = None
-    created_at: str
-
-
 class EvidenceResponse(BaseModel):
     """GET /api/v1/evidence/{claim_ref}?run_id= — the citation drawer.
 
@@ -230,6 +221,18 @@ class EvidenceResponse(BaseModel):
 
     claim_ref: str
     sources: list[EvidenceRow] = Field(default_factory=list)
+
+
+class HistoryEntry(BaseModel):
+    """One row of GET /api/v1/history. threat_level/confidence are optional:
+    a completed run persisted before the strategist agent existed (or any
+    run finished via finish_run(job_id) with no report yet) has neither."""
+
+    job_id: str
+    company: str
+    threat_level: Optional[str] = None
+    confidence: Optional[float] = None
+    created_at: datetime
 
 
 # ============================== auth (users) ==============================
