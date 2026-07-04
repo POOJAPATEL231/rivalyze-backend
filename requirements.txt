@@ -3,6 +3,12 @@ uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
 python-dotenv>=1.0        # optional: loads .env at startup
+pyjwt>=2.8                # JWT sign/verify (HS256)
+bcrypt>=4.1              # password hashing (salted, slow)
+email-validator>=2.1      # backs pydantic EmailStr
+psycopg[binary,pool]>=3.2 # Postgres driver + connection pool
+slowapi>=0.1.9            # rate limiting on auth endpoints
+redis>=5.0               # optional: Redis-backed rate-limit storage (REDIS_URL)
 # dev / test:
 pytest>=8.0
 # optional search fallback:
