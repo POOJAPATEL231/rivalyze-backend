@@ -59,6 +59,16 @@ def _repair_json(text: str) -> str:
 def _mock_completion(prompt: str) -> str:
     """Deterministic offline lane. Sniffs the task from the prompt.
 
+    Each agent sends a differently-shaped extraction prompt, and this
+    function has to guess which one it's looking at using nothing but a
+    keyword unique to that prompt's own instructions (there is no explicit
+    "task type" argument passed down from complete()). Whenever a new agent
+    is added, it needs its own branch here with a JSON body that satisfies
+    that agent's Pydantic schema — otherwise MOCK_MODE falls through to the
+    generic `{"answer": "mock"}` below, which fails schema validation for
+    every schema except a trivial one, and the caller silently degrades to
+    low_signal instead of exercising the real code path.
+
     NOTE (Tushar): added the "pricing_tiers" branch below. Previously this
     only handled discovery-shaped prompts ("competitors" in prompt) and fell
     through to `{"answer": "mock"}` for everything else — including
@@ -68,6 +78,26 @@ def _mock_completion(prompt: str) -> str:
     of the product agent crashed with a pydantic ValidationError. Flagging
     since this file is owned by Mihir — happy to hand off if you want a
     different mock shape.
+
+    NOTE (Tushar): same bug, second occurrence — added the "top_complaints"
+    branch below for review.py. review.py's _SYSTEM_PROMPT always contains
+    the literal word "top_complaints" (it's part of the field-name examples
+    baked into the prompt text), which is what this branch keys off of. The
+    returned "competitor" value is a throwaway placeholder — review.py's
+    _sanitise() re-stamps it with the real competitor name afterwards, the
+    same as the product-agent mock branch does.
+
+    Before this branch existed, every review.run() call under MOCK_MODE hit
+    the generic `{"answer": "mock"}` fallback, which is missing SentimentIntel's
+    required "competitor" field — complete() raised RuntimeError, and
+    review._run_single()'s except-block silently converted that into
+    SentimentIntel(competitor=..., low_signal=True) for every competitor.
+    The bug was invisible from the outside: it never raised past review.run()
+    and low_signal=True looks like "the corpus was thin," not "the mock lane
+    is broken," so it could pass casual smoke-testing indefinitely. Confirmed
+    fixed by re-running the discovery -> product -> review chain in MOCK_MODE
+    and checking review's output has low_signal=False with real-looking
+    complaints/opportunity_gaps instead of empty lists.
     """
     if "competitors" in prompt.lower():
         company = "the company"
@@ -92,6 +122,19 @@ def _mock_completion(prompt: str) -> str:
             "recent_features": ["AI formulas v2 (mock)"],
             "positioning": "docs-as-apps for power teams (mock)",
             "advantages": ["cheaper at small team size (mock)"],
+            "sources": ["https://example.com/mock-source"],
+        })
+    if "top_complaints" in prompt:
+        # "competitor" is required by SentimentIntel even though review.py's
+        # _sanitise() re-stamps it with the caller's known-good name after
+        # validation (same pattern as the product-agent branch above) —
+        # validation happens before that stamp, so this placeholder only
+        # needs to satisfy the schema, not be accurate.
+        return json.dumps({
+            "competitor": "mock",
+            "top_complaints": ["feature overload (mock)"],
+            "opportunity_gaps": ["ship a lightweight tier (mock)"],
+            "overall_sentiment": "NEUTRAL",
             "sources": ["https://example.com/mock-source"],
         })
     return json.dumps({"answer": "mock"})
@@ -124,16 +167,31 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
         for attempt in range(1, ATTEMPTS_PER_LANE + 1):
             try:
                 emit("router", f"{name}/{model} · attempt {attempt}")
+                payload = {"model": model, "temperature": 0.1,
+                           "max_tokens": 1024,  # bound response size/latency/cost
+                           "response_format": {"type": "json_object"},
+                           "messages": [
+                               {"role": "system",
+                                "content": "Reply with a single JSON object only. No prose, no code fences."},
+                               {"role": "user", "content": prompt}]}
+                if name == "gemini":
+                    # Gemini 2.5 models "think" by default even over the OpenAI-
+                    # compat endpoint: invisible reasoning tokens are drawn from
+                    # the SAME max_tokens budget as the visible JSON, and the API
+                    # doesn't report them under completion_tokens, so a truncated
+                    # response looks like plenty of budget was left. Confirmed by
+                    # hand: with reasoning left on, a real discovery-shaped prompt
+                    # came back finish_reason="length" after burning ~980 of 1024
+                    # tokens on thinking, with the visible JSON cut off mid-string
+                    # (schema-fail: "EOF while parsing a string") — every single
+                    # call failed over for this reason, not a genuine outage.
+                    # reasoning_effort="none" turns thinking off so the full
+                    # budget goes to the JSON we actually asked for.
+                    payload["reasoning_effort"] = "none"
                 r = httpx.post(
                     f"{base}/chat/completions",
                     headers={"Authorization": f"Bearer {os.environ[key_env]}"},
-                    json={"model": model, "temperature": 0.1,
-                          "max_tokens": 1024,  # bound response size/latency/cost
-                          "response_format": {"type": "json_object"},
-                          "messages": [
-                              {"role": "system",
-                               "content": "Reply with a single JSON object only. No prose, no code fences."},
-                              {"role": "user", "content": prompt}]},
+                    json=payload,
                     timeout=TIMEOUT)
                 if r.status_code == 429:
                     wait = float(r.headers.get("retry-after", 0) or 0)
