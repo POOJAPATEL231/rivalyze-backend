@@ -105,8 +105,8 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
         threat_level=threat,
         executive_summary=draft.executive_summary or "No executive summary was produced this run.",
         swot=draft.swot,
-        sentiment=_coerce_sentiment(draft.sentiment),
-        head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index)),
+        sentiment=_coerce_sentiment(draft.sentiment, rivals),
+        head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index), rivals),
         opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
                        for o in opps],
         recommendations=[Recommendation(action=r.action, rationale=r.rationale,
@@ -117,20 +117,49 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     )
 
 
-def _coerce_sentiment(raw: dict) -> dict:
-    """Model sentiment -> {rival: SentimentScore}, clamping score to [0,1] and any
-    non-enum label to NEUTRAL, dropping anything unparseable."""
+def _coerce_sentiment(raw: dict, rivals: list[str] | None = None) -> dict:
+    """Model sentiment -> {CONFIRMED_rival: SentimentScore}.
+
+    The frontend joins sentiment to a rival BY NAME, so a key the model spelled
+    differently ("swiggy", "Swiggy Instamart") would leave the gauge blank. We remap
+    every entry to the confirmed competitor name by slug and drop entries that match
+    no confirmed rival. Label is upper-cased before the enum check (so "positive"
+    isn't silently turned into NEUTRAL); score is parsed defensively (a 0-100 scale
+    is rescaled, an unparseable score falls back to 0.5 rather than dropping the rival)."""
+    rivals = rivals or []
     out: dict = {}
     for rival, v in (raw or {}).items():
-        try:
-            score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
-            label = (v.get("label") if isinstance(v, dict) else "") or "NEUTRAL"
-            out[str(rival)] = SentimentScore(
-                score=max(0.0, min(1.0, score)),
-                label=label if label in _SENTIMENTS else "NEUTRAL")
-        except Exception:  # noqa: BLE001 — a bad rival costs the rival, not the report
-            continue
+        name = _match_confirmed(str(rival), rivals) if rivals else str(rival)
+        if not name:
+            continue  # model named a rival we didn't confirm — the UI can't join it
+        out[name] = _one_sentiment(v)
     return out
+
+
+def _match_confirmed(key: str, rivals: list[str]) -> str | None:
+    """Map a model-emitted rival key to the CONFIRMED competitor name. Exact slug
+    match first (handles case/punctuation), then prefix containment (handles a model
+    that adds or omits a suffix — "Swiggy Instamart" vs "Swiggy", "Zomato Ltd" vs
+    "Zomato"), choosing the longest match so a shorter sibling isn't grabbed. Returns
+    None if nothing plausibly matches."""
+    ks = _slug(key)
+    slugs = {_slug(r): r for r in rivals}
+    if ks in slugs:
+        return slugs[ks]
+    candidates = [r for s, r in slugs.items() if s and (ks.startswith(s) or s.startswith(ks))]
+    return max(candidates, key=lambda r: len(_slug(r))) if candidates else None
+
+
+def _one_sentiment(v) -> SentimentScore:
+    try:
+        score = float(v.get("score", 0.5)) if isinstance(v, dict) else 0.5
+    except (TypeError, ValueError):
+        score = 0.5
+    if score > 1.0:                       # model used a 0-100 (or 0-10) scale
+        score = score / 100.0 if score > 10.0 else score / 10.0
+    label = ((v.get("label") if isinstance(v, dict) else "") or "NEUTRAL").strip().upper()
+    return SentimentScore(score=max(0.0, min(1.0, score)),
+                          label=label if label in _SENTIMENTS else "NEUTRAL")
 
 
 def _slug(name: str) -> str:
@@ -171,24 +200,41 @@ def _first_claim_ref(avail: dict) -> str | None:
     return None
 
 
-def _coerce_h2h(raw: list, claim_by_slug: dict | None = None) -> list:
-    """Coerce head-to-head rows to H2HRow, dropping malformed ones, and attach a
-    drawer-queryable claim_ref to each rival cell from the evidence graph — so the UI
-    can click a comparison cell and see the sources behind it. A cell whose rival or
-    dimension has no evidence is left uncited (claim_ref stays None), never faked."""
+def _coerce_h2h_cells(row):
+    """Coerce a row's rival cells so a bare string / scalar becomes {"value": ...} —
+    the shape H2HCell needs. Weak models often flatten cells ("rivals": {"Swiggy":
+    "cheaper"}) which would fail row validation and DROP the whole dimension; this
+    saves the row instead."""
+    if not isinstance(row, dict) or not isinstance(row.get("rivals"), dict):
+        return row
+    fixed = {k: (v if isinstance(v, dict) else {"value": "" if v is None else str(v)})
+             for k, v in row["rivals"].items()}
+    return {**row, "rivals": fixed}
+
+
+def _coerce_h2h(raw: list, claim_by_slug: dict | None = None,
+                rivals: list[str] | None = None) -> list:
+    """Coerce head-to-head rows to H2HRow, saving flattened cells, remapping each
+    rival cell key to the CONFIRMED competitor name (so the UI can join by name), and
+    attaching a drawer-queryable claim_ref from the evidence graph. A cell whose rival
+    or dimension has no evidence is left uncited (claim_ref stays None), never faked."""
     claim_by_slug = claim_by_slug or {}
+    rivals = rivals or []
     out: list = []
     for row in (raw or []):
         try:
-            h = H2HRow.model_validate(row)
+            h = H2HRow.model_validate(_coerce_h2h_cells(row))
         except Exception:  # noqa: BLE001
             continue
         stype = _metric_type(h.metric)
+        remapped: dict = {}
         for rival, cell in (h.rivals or {}).items():
-            if cell.claim_ref:
-                continue  # respect an explicit model-provided ref
-            avail = claim_by_slug.get(_slug(rival), {})
-            cell.claim_ref = avail.get(stype) or _first_claim_ref(avail)
+            name = _match_confirmed(str(rival), rivals) or str(rival)  # keep original if unknown
+            if not cell.claim_ref:
+                avail = claim_by_slug.get(_slug(name), {})
+                cell.claim_ref = avail.get(stype) or _first_claim_ref(avail)
+            remapped[name] = cell
+        h.rivals = remapped
         out.append(h)
     return out
 

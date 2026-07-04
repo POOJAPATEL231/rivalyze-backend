@@ -70,6 +70,34 @@ def test_h2h_cells_get_drawer_queryable_claim_ref():
     assert rows[2].rivals["Coda"].claim_ref in {"pricing:coda", "review:coda"}
 
 
+def test_sentiment_keys_remapped_to_confirmed_rivals():
+    # model spells the rival differently -> must still join to the confirmed name
+    raw = {"swiggy": {"score": 0.2, "label": "negative"},
+           "Zomato Ltd": {"score": 90, "label": "POSITIVE"},
+           "Ghost Co": {"score": 0.5, "label": "NEUTRAL"}}
+    out = strategist._coerce_sentiment(raw, rivals=["Swiggy", "Zomato"])
+    assert set(out) == {"Swiggy", "Zomato"}                # remapped + unknown dropped
+    assert out["Swiggy"].label == "NEGATIVE"               # lower-case label upper-cased
+    assert out["Zomato"].score == 0.9                      # 0-100 scale rescaled
+    assert out["Zomato"].label == "POSITIVE"
+
+
+def test_sentiment_bad_score_falls_back_not_dropped():
+    out = strategist._coerce_sentiment({"Swiggy": {"score": "high", "label": "POSITIVE"}},
+                                       rivals=["Swiggy"])
+    assert "Swiggy" in out and out["Swiggy"].score == 0.5  # unparseable -> 0.5, rival kept
+
+
+def test_h2h_flattened_string_cell_is_saved_not_dropped():
+    # a row whose cells are bare strings must NOT drop the whole dimension
+    raw = [{"metric": "Pricing", "you": "us",
+            "rivals": {"Swiggy": "cheaper plans", "zomato": "premium"}}]
+    rows = strategist._coerce_h2h(raw, {}, rivals=["Swiggy", "Zomato"])
+    assert len(rows) == 1
+    assert set(rows[0].rivals) == {"Swiggy", "Zomato"}     # keys remapped to confirmed
+    assert rows[0].rivals["Swiggy"].value == "cheaper plans"
+
+
 def test_h2h_cell_without_evidence_stays_uncited():
     rows = strategist._coerce_h2h(
         [{"metric": "Pricing", "you": "us", "rivals": {"Ghost": {"value": "?"}}}],
