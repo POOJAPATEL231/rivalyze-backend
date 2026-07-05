@@ -239,6 +239,23 @@ def _coerce_h2h(raw: list, claim_by_slug: dict | None = None,
     return out
 
 
+_EV_ID_RE = re.compile(r"ev-[0-9a-f]{8}")
+
+
+def _normalize_evidence_id(raw: str, index: dict) -> str | None:
+    """Recover a valid evidence id from a model-emitted string that's the right id
+    but wrapped in noise (quotes, trailing punctuation, stray whitespace, case).
+    Exact match first (cheap, common case); otherwise pull the ev-xxxxxxxx token
+    out of the string and check THAT against the index. Never invents a match
+    that isn't already a real id in the index."""
+    if raw in index:
+        return raw
+    m = _EV_ID_RE.search(str(raw).strip().lower())
+    if m and m.group(0) in index:
+        return m.group(0)
+    return None
+
+
 def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
     """Strip unknown evidence ids and recompute confidence (recommendations only)
     from the surviving evidence.
@@ -249,11 +266,18 @@ def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
     headline of the report). A concrete, uncited recommendation is more useful to
     the board than an empty section, so we now KEEP it with its bogus ids stripped
     and a floor confidence recomputed from zero evidence (~0.25). Code still owns
-    citations: an unknown id NEVER reaches the output, so nothing false is asserted."""
+    citations: an unknown id NEVER reaches the output, so nothing false is asserted.
+    Before giving up on a cited id, _normalize_evidence_id recovers it from minor
+    formatting noise (quotes/whitespace/case) — the id still must resolve to a real
+    entry in the evidence index, so nothing false is asserted either way."""
     kept = []
     for it in items or []:
         original = list(getattr(it, "evidence_ids", []) or [])
-        known = [i for i in original if i in index]
+        known = []
+        for i in original:
+            norm = _normalize_evidence_id(i, index)
+            if norm and norm not in known:
+                known.append(norm)
         if original and not known:
             emit("strategist", f"kept {kind} with unverifiable citations stripped: {getattr(it, 'claim_ref', '?')}")
         it.evidence_ids = known
