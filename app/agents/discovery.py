@@ -85,12 +85,12 @@ def _build_corpus(company: str, domain: str, month: str, emit) -> str:
     q3 = f"{company} {domain} market competitors headquarters country".strip()
 
     corpus = ""
-    for q in (q1, q2, q3):
-        for r in search_mod.search(q, emit):
-            # defensive .get(): a search provider row missing a key must not
-            # raise here (discovery's contract is to never raise).
-            title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
-            corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
+    # search the 3 queries CONCURRENTLY (independent I/O) instead of one-after-another.
+    for r in search_mod.search_all((q1, q2, q3), emit):
+        # defensive .get(): a search provider row missing a key must not
+        # raise here (discovery's contract is to never raise).
+        title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
+        corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
 
     return corpus[:config.CORPUS_CAP]  # prompt budget cap (6000 default, 12000 under RICH_SEARCH)
 

@@ -46,6 +46,8 @@ except ImportError:
     def cache_set(key: str, value, ttl: int = 86400):
         _LOCAL_CACHE[key] = value
 
+from concurrent.futures import ThreadPoolExecutor
+
 from app.core import config
 from app.core.counters import counter_incr, today_key
 
@@ -118,6 +120,31 @@ def search(query: str, emit=lambda a, m: None) -> list[dict]:
     return []
 
 
+def search_all(queries, emit=lambda a, m: None) -> list[dict]:
+    """Run several searches CONCURRENTLY and return their combined results in query
+    order. Each search() is independent network I/O, so this turns an agent's N
+    sequential searches (sum of latencies) into ~one search's latency — the single
+    biggest per-agent speedup. Same signature/behaviour as calling search() per query
+    and concatenating, just in parallel. (The global stats counter may under-count by
+    a hair under the race — a metrics-only cost, never a correctness one.)"""
+    qs = [q for q in queries if q and q.strip()]
+    if not qs:
+        return []
+
+    def _one(q):
+        try:
+            return search(q, emit)
+        except Exception:  # noqa: BLE001 — one bad query must not sink the batch
+            return []
+    if len(qs) == 1:
+        return _one(qs[0])
+    out: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(len(qs), 6)) as ex:
+        for res in ex.map(_one, qs):   # ex.map preserves order
+            out.extend(res)
+    return out
+
+
 def _tavily(query: str, emit) -> list[dict] | None:
     key = os.getenv("TAVILY_API_KEY")
     if not key:
@@ -128,7 +155,7 @@ def _tavily(query: str, emit) -> list[dict] | None:
                        json={"api_key": key, "query": query,
                              "max_results": config.SEARCH_MAX_RESULTS,
                              "search_depth": config.SEARCH_DEPTH},
-                       timeout=25.0)
+                       timeout=10.0)   # was 25s — a slow provider must fail over fast
         r.raise_for_status()
         # Only count this as a spend against the daily budget once we know
         # the call actually succeeded — a 4xx/5xx below never reaches here.
@@ -157,7 +184,7 @@ def _serper(query: str, emit) -> list[dict] | None:
             "https://google.serper.dev/search",
             headers={"X-API-KEY": key, "Content-Type": "application/json"},
             json={"q": query, "num": config.SEARCH_MAX_RESULTS},
-            timeout=20.0,
+            timeout=8.0,   # was 20s
         )
         r.raise_for_status()
         counter_incr(today_key("serper"))

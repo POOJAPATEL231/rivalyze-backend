@@ -14,6 +14,7 @@ poller NEVER sees a 500 or a stack trace. The process owns NOTHING durable
 """
 import logging
 import re
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -96,32 +97,45 @@ def _emitter(job_id: str):
     for k in _METRIC_KEYS:
         stats.setdefault(k, 0)
     prior_searches, prior_cache = stats["searches"], stats["cache_hits"]
+    # emit() is now called CONCURRENTLY (agents parallelise competitors/searches), so
+    # guard the counters with a lock, and THROTTLE the DB write so bursts of events
+    # don't hammer Postgres — the poll is every ~2s, so ~1.5s granularity is plenty.
+    lock = threading.Lock()
+    last_flush = [0.0]
 
-    def _flush() -> None:
+    def _flush(force: bool = False) -> None:
+        now = time.time()
+        if not force and now - last_flush[0] < 1.5:
+            return
+        last_flush[0] = now
+        with lock:
+            snapshot = dict(stats)
         try:
-            repository.set_lane_stats(job_id, dict(stats))
+            repository.set_lane_stats(job_id, snapshot)
         except Exception:  # noqa: BLE001 — a live-metric write must never break the run
             pass
 
     def emit(agent: str, msg: str) -> None:
+        # append_events is an atomic jsonb concat at the DB, safe under concurrency.
         repository.append_events(
             job_id, [{"t": round(time.time() - t0, 1), "agent": agent, "msg": msg}]
         )
         changed = False
-        if agent == "router" and ("attempt" in msg or "MOCK" in msg):
-            stats["llm_calls"] += 1
-            lane = msg.split("/")[0].split()[0]
-            stats[lane] = int(stats.get(lane, 0)) + 1
-            changed = True
-        elif agent == "search":
-            stats["searches"] = prior_searches + (search_mod.stats["searches"] - search_base["searches"])
-            stats["cache_hits"] = prior_cache + (search_mod.stats["cache_hits"] - search_base["cache_hits"])
-            changed = True
-        elif agent == "merge":
-            m = re.search(r"fused\s+(\d+)\s+signals.*?(\d+)\s+evidence", msg)
-            if m:
-                stats["signals_found"], stats["evidence_rows"] = int(m.group(1)), int(m.group(2))
+        with lock:
+            if agent == "router" and ("attempt" in msg or "MOCK" in msg):
+                stats["llm_calls"] += 1
+                lane = msg.split("/")[0].split()[0]
+                stats[lane] = int(stats.get(lane, 0)) + 1
                 changed = True
+            elif agent == "search":
+                stats["searches"] = prior_searches + (search_mod.stats["searches"] - search_base["searches"])
+                stats["cache_hits"] = prior_cache + (search_mod.stats["cache_hits"] - search_base["cache_hits"])
+                changed = True
+            elif agent == "merge":
+                m = re.search(r"fused\s+(\d+)\s+signals.*?(\d+)\s+evidence", msg)
+                if m:
+                    stats["signals_found"], stats["evidence_rows"] = int(m.group(1)), int(m.group(2))
+                    changed = True
         if changed:
             _flush()
 

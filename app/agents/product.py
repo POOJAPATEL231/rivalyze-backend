@@ -12,11 +12,12 @@ Owner: Tushar
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from app.core import config
 from app.core.llm_router import complete
-from app.core.search_chain import search
+from app.core.search_chain import search_all
 from app.core.grounding import ground_sources
 from app.models import ProductIntel
 
@@ -59,20 +60,24 @@ def run(competitors: list, emit, company: str = "") -> list[dict]:
     entry). `competitors` items may be plain name strings or dicts with a
     "name" key (LangGraph orchestrator format).
     """
-    results = []
-    for item in competitors:
-        name = item if isinstance(item, str) else item.get("name", str(item))
+    names = [item if isinstance(item, str) else item.get("name", str(item)) for item in competitors]
+    if not names:
+        return []
+
+    def _one(name: str) -> dict:
         try:
-            intel = _process(name, company, emit)
+            return _process(name, company, emit).model_dump()
         except Exception as e:
             # Per-competitor guard: a search-chain crash or any unexpected error
             # for ONE rival degrades only that rival to low_signal — it never
             # raises out of run() and never drops the rest of the batch.
             logger.warning("product: unhandled error for %s: %s", name, e)
             emit("product", f"low signal: {name} · {type(e).__name__}")
-            intel = _low_signal(name)
-        results.append(intel.model_dump())
-    return results
+            return _low_signal(name).model_dump()
+
+    # Process competitors CONCURRENTLY (each is an independent search+LLM); order preserved.
+    with ThreadPoolExecutor(max_workers=min(len(names), 5)) as ex:
+        return list(ex.map(_one, names))
 
 
 def _process(competitor: str, company: str, emit) -> ProductIntel:
@@ -121,13 +126,13 @@ def _build_corpus(competitor: str, company: str, emit) -> str:
 
     seen_urls: set[str] = set()
     parts: list[str] = []
-    for q in queries:
-        for item in search(q, emit):
-            url = item.get("url", "")
-            if url and url in seen_urls:
-                continue
-            seen_urls.add(url)
-            parts.append(f"{item.get('title', '')}\n{item.get('content', '')}\nSOURCE: {url}\n")
+    # search all query angles CONCURRENTLY, then dedup by url.
+    for item in search_all(queries, emit):
+        url = item.get("url", "")
+        if url and url in seen_urls:
+            continue
+        seen_urls.add(url)
+        parts.append(f"{item.get('title', '')}\n{item.get('content', '')}\nSOURCE: {url}\n")
 
     return "\n".join(parts)[:_CORPUS_CAP]
 
