@@ -170,6 +170,7 @@ class CompetitiveReport(BaseModel):
     low_signal_findings: list[str] = Field(default_factory=list)
     analysis_date: str
     stats: Optional[ReportStats] = None  # additive "By the numbers" strip; None on degraded/old runs
+    suggested_questions: list[str] = Field(default_factory=list)  # chatbot starter prompts, filled by the route
 
 
 # ========================= API / run lifecycle ==========================
