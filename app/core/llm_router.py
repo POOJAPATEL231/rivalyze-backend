@@ -292,26 +292,21 @@ def _mock_completion(prompt: str) -> str:
 def _keys_for(key_env: str) -> list[str]:
     """All API keys configured for a provider, in rotation order.
 
-    Supports MULTIPLE keys per provider two ways (mix freely):
-      - comma-separated in the base var:  GROQ_API_KEY=key1,key2,key3
-      - numbered variants:                GROQ_API_KEY_2=key2, GROQ_API_KEY_3=...
-    The router tries the next key for the SAME provider when one is
-    rate-limited / out of quota (or rejected) before failing over to a
-    different provider. A single key (no comma, no _2) behaves exactly as before.
+    ONE env var per provider — comma-separate multiple keys:
+      GROQ_API_KEY=key1,key2,key3
+    This is the only supported form (no numbered _2/_3 variants) so each
+    provider maps to exactly one Azure Key Vault secret name. The router
+    tries the next key for the SAME provider when one is rate-limited /
+    out of quota (or rejected) before failing over to a different provider.
+    A single key (no comma) behaves exactly as before.
     """
     keys: list[str] = []
     seen: set[str] = set()
-    candidates = [os.getenv(key_env, "")]
-    i = 2
-    while os.getenv(f"{key_env}_{i}"):
-        candidates.append(os.getenv(f"{key_env}_{i}", ""))
-        i += 1
-    for c in candidates:
-        for k in c.split(","):
-            k = k.strip()
-            if k and k not in seen:
-                seen.add(k)
-                keys.append(k)
+    for k in os.getenv(key_env, "").split(","):
+        k = k.strip()
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
     return keys
 
 
