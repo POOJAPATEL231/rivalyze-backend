@@ -224,6 +224,9 @@ class _MemStore:
         by_id = {e["id"]: e for e in self.evidence if "id" in e}
         return [by_id[i] for i in evidence_ids if i in by_id]
 
+    def get_all_evidence_for_run(self, run_id: str) -> list[dict]:
+        return [e for e in self.evidence if e.get("run_id") == run_id]
+
 
 _mem = _MemStore()
 
@@ -570,6 +573,23 @@ def get_evidence_by_ids(evidence_ids: list[str]) -> list[dict]:
     return [by_id[eid] for eid in evidence_ids if eid in by_id]
 
 
+def get_all_evidence_for_run(run_id: str) -> list[dict]:
+    """Every evidence row gathered for a run — powers the export's full "Sources"
+    appendix, so the markdown lists ALL distinct sources (parity with
+    stats.distinct_sources), not just the ids that opportunities/recommendations
+    happened to cite. Ordered by source_type then name for a stable, grouped list."""
+    sql = """
+        SELECT id, run_id::text, claim_ref, source_type, source_name, url,
+               snippet, source_date, agent, created_at
+        FROM evidence WHERE run_id = %s
+        ORDER BY source_type, source_name, created_at
+    """
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (run_id,))
+            return cur.fetchall()
+
+
 # ============================ persistence-first ============================
 def find_completed_report(company_name: str) -> Optional[dict]:
     """Case-insensitive company match -> most recent completed run WITH A POPULATED
@@ -751,5 +771,5 @@ for _fn_name in ("create_company", "create_run", "update_run_status", "append_ev
                  "get_competitors", "save_report", "get_report", "find_completed_report",
                  "get_history", "confirm_run", "get_run_company", "set_run_company",
                  "run_id_exists", "replace_competitors", "save_signal", "save_evidence",
-                 "get_evidence", "get_evidence_by_ids"):
+                 "get_evidence", "get_evidence_by_ids", "get_all_evidence_for_run"):
     globals()[_fn_name] = _fallback(_fn_name)(globals()[_fn_name])
