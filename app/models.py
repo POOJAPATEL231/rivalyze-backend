@@ -173,6 +173,30 @@ class CompetitiveReport(BaseModel):
 
 
 # ========================= API / run lifecycle ==========================
+class IdeaContext(BaseModel):
+    """Optional structured intake for idea mode. Lets a founder PIN DOWN the market
+    (industry, geography, buyer, model, stage) instead of the idea pre-step guessing
+    all of it from one sentence — so idea-mode discovery is targeted, not inferred.
+    Every field is optional (default ""); a bare {"idea": "..."} request is unchanged.
+    Geography in particular flows into the resolved domain so discovery prefers
+    same-region rivals (e.g. an Ahmedabad idea -> Indian/regional competitors)."""
+
+    industry: str = Field(default="", max_length=120)          # market/space, e.g. "food delivery"
+    target_geography: str = Field(default="", max_length=120)  # city/region/country the venture serves
+    target_customer: str = Field(default="", max_length=120)   # B2B / B2C / segment
+    business_model: str = Field(default="", max_length=120)    # subscription / marketplace / ads / ...
+    stage: str = Field(default="", max_length=60)              # idea / MVP / launched
+
+    @field_validator("*")
+    @classmethod
+    def _strip_control_chars(cls, v: str) -> str:
+        return "".join(ch for ch in v if ch.isprintable()).strip() if isinstance(v, str) else v
+
+    def is_empty(self) -> bool:
+        return not any((self.industry, self.target_geography, self.target_customer,
+                        self.business_model, self.stage))
+
+
 class AnalyzeRequest(BaseModel):
     # Untrusted user input. Length caps bound prompt/query cost and DoS surface;
     # the validator strips control chars so nothing corrupts the slug, event
@@ -180,6 +204,7 @@ class AnalyzeRequest(BaseModel):
     company: str = Field(default="", max_length=200)
     domain: str = Field(default="", max_length=200)
     idea: Optional[str] = Field(default=None, max_length=500)  # idea mode: a pre-step infers company + domain
+    idea_context: Optional[IdeaContext] = None                 # optional structured idea-mode intake
 
     @field_validator("company", "domain", "idea")
     @classmethod
@@ -209,17 +234,36 @@ class AnalyzeCompanyRequest(BaseModel):
 
 
 class AnalyzeIdeaRequest(BaseModel):
-    """POST /api/v1/analyze/idea — idea mode: a pre-step infers company + domain."""
+    """POST /api/v1/analyze/idea — idea mode: a pre-step infers company + domain.
+
+    `idea` is the only required field. The rest are OPTIONAL structured intake the
+    founder can supply to make discovery precise instead of guessed; omitting them
+    keeps the original single-field behaviour."""
 
     idea: str = Field(min_length=1, max_length=500)
+    industry: str = Field(default="", max_length=120)
+    target_geography: str = Field(default="", max_length=120)
+    target_customer: str = Field(default="", max_length=120)
+    business_model: str = Field(default="", max_length=120)
+    stage: str = Field(default="", max_length=60)
 
     @field_validator("idea")
     @classmethod
-    def _strip_control_chars(cls, v: str) -> str:
+    def _idea_non_blank(cls, v: str) -> str:
         v = "".join(ch for ch in v if ch.isprintable()).strip()
         if not v:
             raise ValueError("idea must not be blank")
         return v
+
+    @field_validator("industry", "target_geography", "target_customer", "business_model", "stage")
+    @classmethod
+    def _strip_optional(cls, v: str) -> str:
+        return "".join(ch for ch in v if ch.isprintable()).strip()
+
+    def to_context(self) -> IdeaContext:
+        return IdeaContext(industry=self.industry, target_geography=self.target_geography,
+                           target_customer=self.target_customer, business_model=self.business_model,
+                           stage=self.stage)
 
 
 class AnalyzeResponse(BaseModel):
