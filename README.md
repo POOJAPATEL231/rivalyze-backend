@@ -4,6 +4,8 @@ discovery → [news ‖ product ‖ review] → merge → strategist → validat
 Every claim is backed by an evidence row; confidence is computed, never model-asserted.
 
 ## Documentation
+- **[Installation & setup guide](docs/INSTALLATION.md)** — clone → running backend in 3 tiers
+  (offline zero-keys / live dev / production shape), Docker, troubleshooting
 - **[Is it production-ready? The proof](docs/PRODUCTION_READINESS.md)** — stack, multi-agent
   failover (multi-key rotation, 4-lane LLM router), security posture, ~239-test coverage
 - **[Backend developer reference](docs/BACKEND.md)** — every endpoint, table, config flag,
