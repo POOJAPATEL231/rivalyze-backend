@@ -106,9 +106,22 @@ def _live_context(company: str, question: str, emit) -> str:
     return "\n\n".join(lines)[:_MAX_CONTEXT_CHARS]
 
 
+_ANTI_HALLUCINATION_RULES = (
+    "Rules: "
+    "1) Use ONLY facts stated in CONTEXT below — never invent numbers, dates, "
+    "competitor names, or claims that aren't there, even if they sound plausible. "
+    "2) If CONTEXT only partially covers the question, answer the part it covers "
+    "and explicitly say what it doesn't cover, rather than filling the gap with a guess. "
+    "3) If CONTEXT has nothing relevant, set needs_live_data=true and leave answer "
+    'empty rather than answering from general knowledge. '
+    "4) Never state a fact more confidently than the source does — hedge ('as of the "
+    "last analysis...', 'reported to be...') rather than asserting stale data as current fact."
+)
+
+
 def _ask(system_note: str, context: str, question: str, emit) -> ChatAnswer:
     prompt = (
-        f"{system_note}\n\n"
+        f"{system_note}\n\n{_ANTI_HALLUCINATION_RULES}\n\n"
         f"CONTEXT:\n{context or '(no context available)'}\n\n"
         f"QUESTION: {question}\n\n"
         'Reply as JSON: {"answer": str, "needs_live_data": bool, "evidence_ids": [str]}. '
@@ -122,6 +135,29 @@ def _ask(system_note: str, context: str, question: str, emit) -> ChatAnswer:
         return ChatAnswer(answer="", needs_live_data=True, evidence_ids=[])
 
 
+_NO_ANSWER_STORED = (
+    "I don't have anything on file for this, and the live search didn't surface a "
+    "reliable source either. This may mean it hasn't come up in an analysis run yet — "
+    "try rephrasing, narrowing the question, or running a fresh analysis for this company."
+)
+_NO_ANSWER_LIVE_ONLY = (
+    "There's no stored analysis for this company yet, and a live web search didn't turn "
+    "up anything usable for this question. Try rephrasing, or run an analysis for this "
+    "company first so there's stored intel to draw on."
+)
+_STALE_NOTE = ("Note: this is based on the last completed analysis (dated {date}), not a "
+               "live check — the underlying facts may have changed since then.")
+
+
+def _staleness_note(context: str) -> str:
+    for line in context.splitlines():
+        if line.startswith("ANALYSIS DATE: "):
+            date = line.removeprefix("ANALYSIS DATE: ").strip()
+            if date and date != "unknown":
+                return _STALE_NOTE.format(date=date)
+    return ""
+
+
 def _run(chat_id: str, company: str, question: str, run_id: str | None) -> None:
     emit = _emit(chat_id)
     emit("chat", f"checking stored intel for {company}")
@@ -132,8 +168,7 @@ def _run(chat_id: str, company: str, question: str, run_id: str | None) -> None:
         live = _live_context(company, question, emit)
         answer = _ask(f"You are Rivalyze's assistant. Answer the question about {company} "
                        "using ONLY the live web search results below.", live, question, emit)
-        chat_store.finish(chat_id, answer.answer or "I couldn't find an answer for that.",
-                          "live", [])
+        chat_store.finish(chat_id, answer.answer.strip() or _NO_ANSWER_LIVE_ONLY, "live", [])
         emit("system", "done")
         return
 
@@ -144,7 +179,9 @@ def _run(chat_id: str, company: str, question: str, run_id: str | None) -> None:
 
     if not answer.needs_live_data and answer.answer.strip():
         cited = [e for e in answer.evidence_ids if e in evidence_ids] or evidence_ids
-        chat_store.finish(chat_id, answer.answer, "stored", cited)
+        note = _staleness_note(context)
+        final = answer.answer.strip() + (f"\n\n{note}" if note else "")
+        chat_store.finish(chat_id, final, "stored", cited)
         emit("system", "done")
         return
 
@@ -155,6 +192,6 @@ def _run(chat_id: str, company: str, question: str, run_id: str | None) -> None:
                        "results that follow, and answer using both.",
                        context + "\n\nLIVE SEARCH RESULTS:\n" + (live or "(none found)"),
                        question, emit)
-    final_answer = live_answer.answer.strip() or answer.answer.strip() or "I couldn't find an answer for that."
+    final_answer = live_answer.answer.strip() or answer.answer.strip() or _NO_ANSWER_STORED
     chat_store.finish(chat_id, final_answer, "mixed" if live else "stored", evidence_ids)
     emit("system", "done")
