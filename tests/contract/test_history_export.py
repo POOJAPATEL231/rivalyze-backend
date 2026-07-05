@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import connection, repository  # noqa: E402
 from app.main import app  # noqa: E402
+from tests.authutil import cleanup_users, make_user  # noqa: E402
 
 client = TestClient(app)
 
@@ -40,21 +41,27 @@ def _unique(prefix: str) -> str:
 
 @pytest.fixture
 def completed_run():
+    # /history now identifies the caller and returns only THEIR runs, so the
+    # fixture owns the run with a real user and exposes that user's auth headers.
+    owner = make_user()
     name = _unique("HistoryExportCo")
     company_id = repository.create_company(name, domain="test")
     job_id = _unique("job")
-    run_id = repository.create_run(job_id, company_id)
+    run_id = repository.create_run(job_id, company_id, owner["user_id"])
     repository.finish_run(job_id, "HIGH", 0.77)
-    yield {"job_id": job_id, "run_id": run_id, "company": name, "company_id": company_id}
+    yield {"job_id": job_id, "run_id": run_id, "company": name, "company_id": company_id,
+           "user_id": owner["user_id"], "headers": owner["headers"]}
     with repository.get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+    cleanup_users(owner["user_id"])
 
 
 # ================================ /history ================================
 @requires_db
 def test_history_returns_completed_run(completed_run):
-    r = client.get("/api/v1/history", params={"company": completed_run["company"]})
+    r = client.get("/api/v1/history", params={"company": completed_run["company"]},
+                   headers=completed_run["headers"])
     assert r.status_code == 200
     body = r.json()
     assert len(body) == 1
@@ -68,18 +75,39 @@ def test_history_returns_completed_run(completed_run):
 
 @requires_db
 def test_history_filter_excludes_other_companies(completed_run):
-    r = client.get("/api/v1/history", params={"company": "zz-no-such-company-zz"})
+    r = client.get("/api/v1/history", params={"company": "zz-no-such-company-zz"},
+                   headers=completed_run["headers"])
     assert r.status_code == 200
     assert r.json() == []
 
 
 @requires_db
+def test_history_requires_authentication():
+    # no bearer -> get_current_user rejects before any data is read
+    assert client.get("/api/v1/history").status_code == 401
+
+
+@requires_db
+def test_history_hides_other_users_runs(completed_run):
+    # a different, valid user must not see completed_run's row
+    other = make_user()
+    try:
+        r = client.get("/api/v1/history", params={"company": completed_run["company"]},
+                       headers=other["headers"])
+        assert r.status_code == 200
+        assert r.json() == []
+    finally:
+        cleanup_users(other["user_id"])
+
+
+@requires_db
 def test_history_newest_first(completed_run):
     job2 = _unique("job")
-    repository.create_run(job2, completed_run["company_id"])
+    repository.create_run(job2, completed_run["company_id"], completed_run["user_id"])
     repository.finish_run(job2, "LOW", 0.2)
 
-    r = client.get("/api/v1/history", params={"company": completed_run["company"]})
+    r = client.get("/api/v1/history", params={"company": completed_run["company"]},
+                   headers=completed_run["headers"])
     job_ids = [e["job_id"] for e in r.json()]
     assert job_ids.index(job2) < job_ids.index(completed_run["job_id"])
 

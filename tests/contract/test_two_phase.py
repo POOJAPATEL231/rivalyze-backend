@@ -21,19 +21,26 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import connection  # noqa: E402
 from app.main import app  # noqa: E402
+from tests.authutil import cleanup_users, make_user  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not connection.is_enabled(),
                                 reason="requires a database (set DATABASE_URL or PG*)")
 
 client = TestClient(app)
 
+# /analyze and /history now identify the caller (get_current_user). One module
+# user owns every run these tests create; _AUTH["headers"] carries its JWT.
+_AUTH: dict = {}
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _cleanup():
+    _AUTH.update(make_user())
     yield
     with connection.pool().connection() as c, c.cursor() as cur:
         cur.execute("DELETE FROM companies WHERE slug LIKE 'twophaseco%'")
         c.commit()
+    cleanup_users(_AUTH.get("user_id"))
 
 
 def _fresh() -> str:
@@ -53,7 +60,8 @@ def _poll(job_id: str, wanted: set[str], tries: int = 300) -> dict:
 
 
 def _to_gate(company: str):
-    r = client.post("/api/v1/analyze", json={"company": company, "domain": "testing"})
+    r = client.post("/api/v1/analyze", json={"company": company, "domain": "testing"},
+                    headers=_AUTH["headers"])
     assert r.status_code == 200
     assert r.json()["status"] == "running_discovery"       # TC-C09: phase-1 status
     job = r.json()["job_id"]
@@ -97,8 +105,10 @@ def test_confirm_runs_analysis_and_serves_report_and_reads():
     missing = "00000000-0000-0000-0000-000000000000"
     assert client.get("/api/v1/evidence/x:y", params={"run_id": missing}).status_code == 404
 
-    # history includes this completed run (served by history_routes.py)
-    hist = client.get("/api/v1/history", params={"company": company}).json()
+    # history includes this completed run (served by history_routes.py), scoped
+    # to the authenticated owner
+    hist = client.get("/api/v1/history", params={"company": company},
+                      headers=_AUTH["headers"]).json()
     assert any(h["job_id"] == job for h in hist)
 
     # markdown export (served by history_routes.py; unsupported format -> 400)

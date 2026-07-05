@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 
 from app.core import config
 from app.db import repository as repo
+from tests.authutil import cleanup_users, make_user
 
 if not config.DATABASE_URL:
     pytest.skip("DATABASE_URL not configured — repository tests need a real DB", allow_module_level=True)
@@ -31,6 +32,13 @@ def company():
     with repo.get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+
+
+@pytest.fixture
+def user():
+    u = make_user()
+    yield u
+    cleanup_users(u["user_id"])
 
 
 @pytest.fixture
@@ -219,21 +227,43 @@ def test_find_completed_report(run):
     assert found == {"job_id": run["job_id"], "run_id": run["run_id"]}
 
 
-def test_get_history_filters_and_orders_newest_first(company):
+def test_get_history_filters_and_orders_newest_first(company, user):
     job_a = _unique("pytest-job")
-    repo.create_run(job_a, company["id"])
+    repo.create_run(job_a, company["id"], user["user_id"])
     repo.finish_run(job_a, "LOW", 0.2)
 
     job_b = _unique("pytest-job")
-    repo.create_run(job_b, company["id"])
+    repo.create_run(job_b, company["id"], user["user_id"])
     repo.finish_run(job_b, "HIGH", 0.9)
 
-    history = repo.get_history(limit=20, company=company["name"])
+    history = repo.get_history(limit=20, company=company["name"], user_id=user["user_id"])
     job_ids = [h["job_id"] for h in history]
     assert job_ids.index(job_b) < job_ids.index(job_a)  # newest (job_b) first
 
-    filtered = repo.get_history(limit=20, company="zz-no-such-company-zz")
+    filtered = repo.get_history(limit=20, company="zz-no-such-company-zz", user_id=user["user_id"])
     assert filtered == []
+
+
+def test_get_history_is_scoped_to_owner(company, user):
+    """A run stamped with one user is invisible to another user's history — the
+    core data-isolation guarantee. A NULL-owner (legacy) run is invisible to all."""
+    mine = _unique("pytest-job")
+    repo.create_run(mine, company["id"], user["user_id"])
+    repo.finish_run(mine, "HIGH", 0.9)
+
+    legacy = _unique("pytest-job")
+    repo.create_run(legacy, company["id"])          # no owner -> user_id NULL
+    repo.finish_run(legacy, "LOW", 0.1)
+
+    other = make_user()
+    try:
+        mine_rows = repo.get_history(limit=20, company=company["name"], user_id=user["user_id"])
+        assert [h["job_id"] for h in mine_rows] == [mine]        # only my run, never the legacy one
+
+        other_rows = repo.get_history(limit=20, company=company["name"], user_id=other["user_id"])
+        assert other_rows == []                                  # the other user sees nothing
+    finally:
+        cleanup_users(other["user_id"])
 
 
 # ============================== search cache ==============================
