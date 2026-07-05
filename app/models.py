@@ -263,13 +263,19 @@ class EvidenceResponse(BaseModel):
 class HistoryEntry(BaseModel):
     """One row of GET /api/v1/history. threat_level/confidence are optional:
     a completed run persisted before the strategist agent existed (or any
-    run finished via finish_run(job_id) with no report yet) has neither."""
+    run finished via finish_run(job_id) with no report yet) has neither.
+
+    has_new (Monitor Delta): True ONLY on a company's newest row when its
+    latest run carries signals the previous run didn't — the frontend's "new
+    changes" popup trigger. Older rows / first-run companies stay False.
+    Details come from GET /api/v1/companies/{slug}/delta."""
 
     job_id: str
     company: str
     threat_level: Optional[str] = None
     confidence: Optional[float] = None
     created_at: datetime
+    has_new: bool = False
 
 
 class DeltaSignal(BaseModel):

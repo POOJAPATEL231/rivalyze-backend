@@ -40,9 +40,11 @@ def _fresh() -> str:
     return f"TwoPhaseCo{uuid.uuid4().hex[:8]}"
 
 
-def _poll(job_id: str, wanted: set[str]) -> dict:
+def _poll(job_id: str, wanted: set[str], tries: int = 300) -> dict:
+    # generous ceiling (30s): the shared Azure PG can be slow under a full-suite
+    # run; a short poll window made this file flaky at suite level.
     last: dict = {}
-    for _ in range(100):
+    for _ in range(tries):
         last = client.get(f"/api/v1/runs/{job_id}").json()
         if last.get("status") in wanted:
             return last
