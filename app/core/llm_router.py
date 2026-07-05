@@ -66,13 +66,12 @@ LANES = {
         ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_EXTRACT_MODEL", "meta-llama/llama-3.3-70b-instruct:free"), "openrouter"),
     ],
     "reason": [
-        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash"), "gemini"),
-        # Real chain-of-thought, free, on Groq. Tried second (right after Gemini,
-        # whose own thinking mode is forced off below) so the strategist gets at
-        # least one genuine reasoning pass before falling back to non-reasoning
+        # Real chain-of-thought, free, on Groq. Tried FIRST so the strategist
+        # gets a genuine reasoning pass before falling back to non-reasoning
         # models. Uses its own budget key since it's a separate daily allowance
         # from the 70b-versatile row further down.
         ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_DEEPSEEK_MODEL", "deepseek-r1-distill-llama-70b"), "groq_deepseek"),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash"), "gemini"),
         ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b"),               "cerebras"),
         ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_REASON_MODEL", "llama-3.3-70b-versatile"), "groq_70b"),
         ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_REASON_MODEL", "deepseek/deepseek-chat-v3.1:free"), "openrouter"),
