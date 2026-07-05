@@ -83,6 +83,16 @@ CORPUS_CAP: int = _int_env("CORPUS_CAP", 12000 if RICH_SEARCH else 6500)
 # or fails a run.
 REPORT_EVAL: bool = _flag("REPORT_EVAL")
 
+# --- concentric discovery (OFF by default) ---
+# When on, company-mode discovery first grounds the company's location (city/region/
+# country) + size from search, then searches for rivals in EXPANDING RADIUS (city ->
+# region -> country -> global), widening only when a tier is thin, and ranks the
+# closest by geography + size. Deeper/closer rivals, but 1 extra LLM call + more
+# searches, so keep off while quota is tight. Off = today's flat discovery, unchanged.
+CONCENTRIC_DISCOVERY: bool = _flag("CONCENTRIC_DISCOVERY")
+# Widen to the next radius when a tier yields fewer than this many distinct results.
+CONCENTRIC_MIN_RESULTS: int = _int_env("CONCENTRIC_MIN_RESULTS", 4)
+
 # --- JWT user auth ---
 # Secret MUST come from the environment in any shared/deployed run. When it is
 # absent (local/MOCK dev) we mint a random per-process secret so tokens are
