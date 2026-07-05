@@ -56,6 +56,9 @@ def idea_to_domain(idea: str, emit: EmitFn, *, context: Optional[dict] = None,
     target market even if the model omits it. complete_fn is a keyword-only injection
     point for tests and defaults to the shared model-router."""
     idea = (idea or "").strip()
+    # "any context?" here works off the plain state dict the orchestrator passes, so it
+    # reuses _context_lines rather than IdeaContext.is_empty() (the model-level check used
+    # by the request layer). Same question, two layers — the dict is what reaches this call.
     has_ctx = bool(_context_lines(context))
     if not idea and not has_ctx:
         emit("system", "idea pre-step: empty idea · heuristic fallback")
@@ -109,7 +112,9 @@ def _apply_context(domain: str, context: Optional[dict]) -> str:
         domain = f"{industry} {domain}".strip() if domain else industry
     geo = _ctx_get(context, "target_geography")
     if geo and geo.lower() not in domain.lower():
-        domain = f"{domain} in {geo}".strip()
+        # "... in {geo}" when there's a phrase to qualify; just {geo} when the domain
+        # is empty (only-geography, no idea/industry) — avoids a domain like "in India".
+        domain = f"{domain} in {geo}".strip() if domain else geo
     return domain
 
 

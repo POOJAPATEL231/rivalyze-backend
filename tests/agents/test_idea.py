@@ -191,6 +191,18 @@ def test_context_only_no_free_text_still_resolves():
     assert result.domain.strip() and "uae" in result.domain.lower()
 
 
+def test_geography_only_empty_domain_does_not_start_with_in():
+    # LLM fails + empty/meaningless idea + no industry + only geography: the domain
+    # must be "Ahmedabad, India", not "in Ahmedabad, India".
+    def boom(task_class, prompt, schema, emit):
+        raise RuntimeError("all lanes exhausted")
+    _, emit = collector()
+    result = idea_to_domain("😀", emit, context=_ctx(target_geography="Ahmedabad, India"),
+                            complete_fn=boom)
+    assert result.domain == "Ahmedabad, India"
+    assert not result.domain.lower().startswith("in ")
+
+
 # ------------------------------ request models ------------------------------
 def test_idea_request_optional_fields_map_to_context():
     req = AnalyzeIdeaRequest(idea="an app", industry="pet care", target_geography="Ahmedabad")
