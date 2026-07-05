@@ -10,7 +10,7 @@ def emit():
 @pytest.fixture(autouse=True)
 def fat_search(monkeypatch):
     """Default: search returns enough content to clear the 300-char threshold."""
-    monkeypatch.setattr("app.agents.product.search", lambda q, e: [
+    monkeypatch.setattr("app.agents.product.search_all", lambda q, e: [
         {"title": "Test", "url": "https://coda.io/pricing", "content": "Pro $12/seat AI included " * 25}
     ])
 
@@ -41,7 +41,7 @@ def test_pricing_tiers_are_plain_strings(emit):
 
 def test_low_signal_on_thin_corpus(emit, monkeypatch):
     """Empty search -> corpus < 300 chars -> low_signal=True, complete() never called."""
-    monkeypatch.setattr("app.agents.product.search", lambda q, e: [])
+    monkeypatch.setattr("app.agents.product.search_all", lambda q, e: [])
     from app.agents.product import run
     with patch("app.agents.product.complete") as mc:
         result = run(["Ghost Corp"], emit)

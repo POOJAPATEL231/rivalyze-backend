@@ -31,6 +31,7 @@ opportunistically (corpus-key memoisation) — its absence is non-fatal.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable, Literal
 
@@ -38,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from app.core import config
 from app.core.llm_router import complete
-from app.core.search_chain import search
+from app.core.search_chain import search_all
 from app.core.grounding import ground_sources
 from app.models import SentimentIntel
 
@@ -133,18 +134,22 @@ def run(
     Returns:
         One SentimentIntel per competitor, in input order. Never raises.
     """
-    results: list[SentimentIntel] = []
+    if not competitors:
+        return []
 
-    for competitor in competitors:
+    def _one(competitor: str) -> SentimentIntel:
         try:
-            result = _run_single(competitor, company, emit)
+            return _run_single(competitor, company, emit)
         except Exception as exc:  # last-resort safety net — caller always gets a row
             logger.error("reviews · unhandled error for %s: %s", competitor, exc)
             _safe_emit(emit, "reviews", f"reviews · error for {competitor}: {exc}")
-            result = SentimentIntel(competitor=competitor, low_signal=True)
-        results.append(result)
+            return SentimentIntel(competitor=competitor, low_signal=True)
 
-    return results
+    # GATHER_CONCURRENCY workers (default 1 = sequential; LLM bursts hit rate limits).
+    # Order preserved; searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(competitors), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(_one, competitors))
 
 
 # ---------- internals ----------
@@ -156,20 +161,12 @@ def _run_single(
 ) -> SentimentIntel:
     """Process a single competitor. May raise — caller wraps in try/except."""
 
-    # 1. Search — two query angles to broaden recall.
-    raw_results: list[dict] = []
-    for query in (
+    # 1. Search — three query angles to broaden recall, run CONCURRENTLY.
+    raw_results: list[dict] = search_all((
         f"{competitor} customer complaints problems {MONTH}",
         f"{competitor} negative reviews reddit {MONTH}",
         f"{competitor} app store G2 trustpilot rating review",
-    ):
-        try:
-            hits = search(query, emit)
-        except Exception as exc:
-            _safe_emit(emit, "reviews", f"reviews · search fail ({competitor}): {exc}")
-            hits = []
-        if hits:
-            raw_results.extend(hits)
+    ), emit)
 
     # 2. Build the corpus — bound both per-result and total length.
     corpus = _build_corpus(raw_results)

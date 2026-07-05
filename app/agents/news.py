@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -47,7 +48,14 @@ def run(competitors: list[str], emit,
     complete_fn = complete_fn or complete
 
     month = datetime.now().strftime("%B %Y")
-    return [_scan_one(c, month, search_fn, complete_fn, emit) for c in competitors]
+    if not competitors:
+        return []
+    # Scan competitors with GATHER_CONCURRENCY workers (default 1 = sequential; the
+    # per-competitor LLM work bursts rate limits, so only widen with quota headroom).
+    # Order preserved. Searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(competitors), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(lambda c: _scan_one(c, month, search_fn, complete_fn, emit), competitors))
 
 
 def _scan_one(competitor: str, month: str, search_fn, complete_fn, emit) -> NewsSignals:
@@ -82,11 +90,22 @@ def _gather_corpus(competitor: str, month: str, search_fn, emit) -> str:
     _CORPUS_CAP characters. Each search row is read defensively; a row with no URL
     still contributes its text as context but gets no SOURCE line, so nothing
     derived from it can clear the grounding filter."""
+    queries = (f"{competitor} latest news {month}",
+               f"{competitor} product launch funding {month}",
+               f"{competitor} partnership expansion strategy {month}")
+
+    def _one(q):
+        try:
+            return search_fn(q, emit)
+        except Exception:  # noqa: BLE001 — one bad query must not sink the corpus
+            return []
+    # search the query angles CONCURRENTLY (via the injected search_fn, so tests still stub it).
+    with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        results_lists = list(ex.map(_one, queries))
+
     corpus = ""
-    for q in (f"{competitor} latest news {month}",
-              f"{competitor} product launch funding {month}",
-              f"{competitor} partnership expansion strategy {month}"):
-        for r in search_fn(q, emit):
+    for results in results_lists:
+        for r in results:
             title = str(r.get("title", "")).strip()
             content = str(r.get("content", "")).strip()
             url = str(r.get("url", "")).strip()

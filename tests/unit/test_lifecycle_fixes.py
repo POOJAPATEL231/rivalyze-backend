@@ -60,7 +60,10 @@ def test_emitter_tracks_live_header_metrics():
     assert stats["signals_found"] == 17
     assert stats["evidence_rows"] == 28
     assert stats["searches"] >= 3
-    # persisted LIVE (not just at the end) so the poll shows it mid-run
+    # writes are THROTTLED (~1.5s) now that emit() is called concurrently, so a burst
+    # persists at least once mid-run, and the end-of-run force flush lands the finals.
+    assert repository.get_run("metric-job")["lane_stats"]        # something persisted live
+    lifecycle._persist_lane_stats("metric-job", stats)          # final flush (as the pipeline does)
     persisted = repository.get_run("metric-job")["lane_stats"]
     assert persisted["llm_calls"] == 2 and persisted["signals_found"] == 17
 

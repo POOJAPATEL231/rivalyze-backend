@@ -83,6 +83,17 @@ CORPUS_CAP: int = _int_env("CORPUS_CAP", 12000 if RICH_SEARCH else 6500)
 # or fails a run.
 REPORT_EVAL: bool = _flag("REPORT_EVAL")
 
+# --- gather concurrency ---
+# How many competitors the news/product/review agents process AT ONCE. Default 1
+# (sequential) because concurrent LLM calls BURST the provider rate limits — under a
+# tight quota that exhausts every lane and competitors come back empty, which is both
+# slower and lower-quality than going one at a time. Raise to 3-5 ONLY when you have
+# quota headroom (more keys / a live Gemini). Note: search angles WITHIN each agent
+# are always parallel (they're I/O, not rate-limited) — this only gates the LLM work.
+# Aggregate awareness: effective concurrent SEARCH threads ≈ 3 gather lanes ×
+# GATHER_CONCURRENCY × ~6 queries, so keep this modest (≤5) even with headroom.
+GATHER_CONCURRENCY: int = _int_env("GATHER_CONCURRENCY", 1)
+
 # --- JWT user auth ---
 # Secret MUST come from the environment in any shared/deployed run. When it is
 # absent (local/MOCK dev) we mint a random per-process secret so tokens are
