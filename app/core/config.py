@@ -90,6 +90,8 @@ REPORT_EVAL: bool = _flag("REPORT_EVAL")
 # slower and lower-quality than going one at a time. Raise to 3-5 ONLY when you have
 # quota headroom (more keys / a live Gemini). Note: search angles WITHIN each agent
 # are always parallel (they're I/O, not rate-limited) — this only gates the LLM work.
+# Aggregate awareness: effective concurrent SEARCH threads ≈ 3 gather lanes ×
+# GATHER_CONCURRENCY × ~6 queries, so keep this modest (≤5) even with headroom.
 GATHER_CONCURRENCY: int = _int_env("GATHER_CONCURRENCY", 1)
 
 # --- JWT user auth ---

@@ -103,12 +103,14 @@ def _emitter(job_id: str):
     lock = threading.Lock()
     last_flush = [0.0]
 
-    def _flush(force: bool = False) -> None:
-        now = time.time()
-        if not force and now - last_flush[0] < 1.5:
-            return
-        last_flush[0] = now
+    def _flush() -> None:
+        # throttle-check, timestamp, and snapshot all under the lock so two threads
+        # can't both pass the gate (duplicate write) or copy stats mid-mutation. The
+        # DB write itself runs OUTSIDE the lock — never hold the lock across I/O.
         with lock:
+            if time.time() - last_flush[0] < 1.5:
+                return
+            last_flush[0] = time.time()
             snapshot = dict(stats)
         try:
             repository.set_lane_stats(job_id, snapshot)
