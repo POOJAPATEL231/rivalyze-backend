@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.core import config  # noqa: E402
 from app.db import connection, repository  # noqa: E402
 from app.main import app  # noqa: E402
+from tests.authutil import cleanup_users, make_user  # noqa: E402
 
 client = TestClient(app)
 
@@ -48,11 +49,13 @@ _EXTRA = {"agent": "review", "competitor": "ClickUp", "type": "pricing",
           "payload": {"event": "New enterprise pricing tier"}, "evidence_ids": ["ev-delta1"]}
 
 
-def _seed_run(company_id: str, signals: list[dict], *, backdate_days: int = 0) -> str:
+def _seed_run(company_id: str, signals: list[dict], *, backdate_days: int = 0,
+              user_id: str | None = None) -> str:
     """completed run + its signals; optionally backdated so latest/previous
-    ordering is deterministic (finish_run stamps now(), back-to-back runs tie)."""
+    ordering is deterministic (finish_run stamps now(), back-to-back runs tie).
+    user_id stamps the owner so the run surfaces in that user's GET /history."""
     job_id = _unique("job-")
-    run_id = repository.create_run(job_id, company_id)
+    run_id = repository.create_run(job_id, company_id, user_id)
     for sig in signals:
         repository.save_signal({**sig, "run_id": run_id})
     repository.finish_run(job_id)
@@ -72,6 +75,13 @@ def company():
     with repository.get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
         conn.commit()
+
+
+@pytest.fixture
+def user():
+    u = make_user()
+    yield u
+    cleanup_users(u["user_id"])
 
 
 # ------------------------- TC-S01: dedupe proof -------------------------
@@ -141,36 +151,36 @@ def test_delta_accepts_good_token(company, monkeypatch):
 
 
 # ---------------- has_new flag on GET /history (popup trigger) ----------------
-def _history_rows(company_name: str) -> list[dict]:
-    r = client.get("/api/v1/history", params={"company": company_name})
+def _history_rows(company_name: str, headers: dict) -> list[dict]:
+    r = client.get("/api/v1/history", params={"company": company_name}, headers=headers)
     assert r.status_code == 200
     return r.json()
 
 
 @requires_db
-def test_history_flags_new_changes_on_newest_row_only(company):
-    _seed_run(company["id"], _BASE_R0, backdate_days=7)
-    _seed_run(company["id"], _BASE_R1 + [_EXTRA])   # latest run has 1 genuinely new signal
+def test_history_flags_new_changes_on_newest_row_only(company, user):
+    _seed_run(company["id"], _BASE_R0, backdate_days=7, user_id=user["user_id"])
+    _seed_run(company["id"], _BASE_R1 + [_EXTRA], user_id=user["user_id"])   # latest run has 1 genuinely new signal
 
-    rows = _history_rows(company["name"])
+    rows = _history_rows(company["name"], user["headers"])
     assert len(rows) == 2
     assert rows[0]["has_new"] is True               # newest row -> popup
     assert rows[1]["has_new"] is False              # older row never flagged
 
 
 @requires_db
-def test_history_no_flag_when_delta_is_empty(company):
-    _seed_run(company["id"], _BASE_R0, backdate_days=7)
-    _seed_run(company["id"], _BASE_R1)              # identical (reworded) -> no delta
+def test_history_no_flag_when_delta_is_empty(company, user):
+    _seed_run(company["id"], _BASE_R0, backdate_days=7, user_id=user["user_id"])
+    _seed_run(company["id"], _BASE_R1, user_id=user["user_id"])              # identical (reworded) -> no delta
 
-    rows = _history_rows(company["name"])
+    rows = _history_rows(company["name"], user["headers"])
     assert [r["has_new"] for r in rows] == [False, False]
 
 
 @requires_db
-def test_history_first_run_company_not_flagged(company):
-    _seed_run(company["id"], _BASE_R0)
-    rows = _history_rows(company["name"])
+def test_history_first_run_company_not_flagged(company, user):
+    _seed_run(company["id"], _BASE_R0, user_id=user["user_id"])
+    rows = _history_rows(company["name"], user["headers"])
     assert len(rows) == 1 and rows[0]["has_new"] is False
 
 

@@ -171,17 +171,21 @@ def find_completed(company: str) -> str | None:
 
 
 # ==================================== phase 1 ====================================
-def start_run(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+def start_run(req: AnalyzeRequest, background_tasks: BackgroundTasks,
+              user_id: str | None = None) -> AnalyzeResponse:
     """Create the run row, launch Phase 1 (discovery), return IMMEDIATELY.
 
     The pipeline never runs synchronously — FastAPI BackgroundTasks executes
     start_discovery after the response is sent (sync fn -> Starlette threadpool,
     so the event loop is never blocked by httpx/sleep).
+
+    user_id is the authenticated caller (from get_current_user); it is stamped on
+    the run so GET /history can scope results to its owner.
     """
     name = req.company or (req.idea or "")
     job_id = f"rivalyze-{_slug(name)}-{uuid.uuid4().hex[:6]}"
     company_id = repository.create_company(name, req.domain)
-    run_id = repository.create_run(job_id, company_id)
+    run_id = repository.create_run(job_id, company_id, user_id)
     background_tasks.add_task(start_discovery, job_id, run_id, req)
     return AnalyzeResponse(job_id=job_id, status="running_discovery")
 
