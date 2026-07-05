@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from ..core import lifecycle
 from ..core.auth import get_current_user, require_token
+from ..core.suggestions import suggested_questions
 from ..db import repository
 from ..models import (
     AnalyzeCompanyRequest,
@@ -122,7 +123,10 @@ def get_report_endpoint(run_id: str) -> CompetitiveReport:
     row = repository.get_report(run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="report not found")
-    return CompetitiveReport.model_validate(row["report"])
+    report = CompetitiveReport.model_validate(row["report"])
+    competitors = repository.get_competitors(run_id)
+    report.suggested_questions = suggested_questions(report.company, report, competitors)
+    return report
 
 
 @router.get("/evidence-refs", response_model=list[EvidenceRow], dependencies=[Depends(require_token)])
