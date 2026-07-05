@@ -18,6 +18,7 @@ derived here from `sentiment` and `head_to_head`, the two fields that actually
 carry per-rival data.
 """
 from typing import Callable
+from urllib.parse import urlparse
 
 EvidenceLookup = Callable[[list[str]], list[dict]]
 
@@ -29,12 +30,19 @@ _THREAT_BADGE = {
 }
 
 
-def report_to_markdown(report: dict, evidence_lookup: EvidenceLookup) -> str:
-    """Render one CompetitiveReport dict as clean CommonMark markdown.
+def report_to_markdown(report: dict, evidence_lookup: EvidenceLookup,
+                       all_evidence: list[dict] | None = None) -> str:
+    """Render one CompetitiveReport dict as clean CommonMark markdown — a complete,
+    lossless view of the report JSON so the export carries the SAME data as
+    GET /reports/{id}.
 
-    evidence_lookup(evidence_ids) -> [{source_name, url, snippet}, ...] is
-    called once per opportunity/recommendation to resolve its citations
-    (e.g. repository.get_evidence_by_ids).
+    evidence_lookup(evidence_ids) -> [{source_name, url, snippet}, ...] resolves an
+    opportunity/recommendation's inline citations (e.g. repository.get_evidence_by_ids).
+
+    all_evidence is EVERY evidence row for the run (repository.get_all_evidence_for_run):
+    it feeds the full "Sources" appendix so the markdown lists all distinct sources,
+    not just the ids that opportunities/recommendations cited. None -> the appendix is
+    skipped (older callers keep working unchanged).
     """
     company = report.get("company", "Unknown")
     threat = report.get("threat_level", "")
@@ -50,6 +58,7 @@ def report_to_markdown(report: dict, evidence_lookup: EvidenceLookup) -> str:
         report.get("executive_summary") or "_No summary available._",
         "",
     ]
+    lines += _verdict(report.get("verdict") or {})
     lines += _rival_rollups(report)
     lines += _swot(report.get("swot") or {})
     lines += _cited_section(
@@ -58,9 +67,66 @@ def report_to_markdown(report: dict, evidence_lookup: EvidenceLookup) -> str:
     lines += _cited_section(
         "Recommendations", report.get("recommendations") or [], _recommendation_heading, evidence_lookup
     )
+    lines += _stats(report.get("stats") or {})
+    lines += _suggested_questions(report.get("suggested_questions") or [])
     lines += _low_signal(report.get("low_signal_findings") or [])
+    lines += _sources(all_evidence or [])
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _verdict(verdict: dict) -> list[str]:
+    """The bottom-line "Verdict" block — same data the Side-by-side view shows,
+    rendered as markdown. Additive: an older report with no verdict renders nothing.
+    Guarded field-by-field so a malformed persisted value can't 500 the export."""
+    if not verdict:
+        return []
+    lines = ["## Verdict", ""]
+    if verdict.get("headline"):
+        lines += [f"**{verdict['headline']}**", ""]
+    if verdict.get("summary"):
+        lines += [verdict["summary"], ""]
+    bullets: list[str] = []
+    if verdict.get("biggest_threat"):
+        bullets.append(f"- **Biggest threat:** {verdict['biggest_threat']}")
+    if verdict.get("openings"):
+        bullets.append(f"- **Openings:** {', '.join(verdict['openings'])}")
+    if verdict.get("you_lead"):
+        bullets.append(f"- **You lead on:** {', '.join(verdict['you_lead'])}")
+    if verdict.get("top_move"):
+        bullets.append(f"- **Top move:** {verdict['top_move']}")
+    if bullets:
+        lines += bullets + [""]
+    if verdict.get("confidence_note"):
+        lines += [f"_{verdict['confidence_note']}_", ""]
+    return lines
+
+
+def _stats(stats: dict) -> list[str]:
+    """The "By the Numbers" strip (ReportStats) — deterministic counts already on the
+    report JSON. Rendered so the export carries the same data as GET /reports/{id}."""
+    if not stats:
+        return []
+    lines = ["## By the Numbers", ""]
+    for label, key in (
+        ("Evidence collected", "evidence_count"),
+        ("Competitors analyzed", "competitors_analyzed"),
+        ("Distinct sources", "distinct_sources"),
+        ("Competitors with complaints", "competitors_with_complaints"),
+        ("Uncorroborated claims", "uncorroborated_claims"),
+    ):
+        val = stats.get(key)
+        if val is not None:
+            lines.append(f"- **{label}:** {val}")
+    if stats.get("corroboration_rate") is not None:
+        lines.append(f"- **Corroboration rate:** {stats['corroboration_rate']}%")
+    if stats.get("freshest_signal_days") is not None:
+        lines.append(f"- **Freshest signal:** {stats['freshest_signal_days']} days old")
+    avg = stats.get("avg_confidence")
+    if isinstance(avg, (int, float)):
+        lines.append(f"- **Avg. recommendation confidence:** {avg:.0%}")
+    lines.append("")
+    return lines
 
 
 def _rival_rollups(report: dict) -> list[str]:
@@ -148,6 +214,57 @@ def _cited_section(
                 url = ev.get("url", "")
                 lines.append(f"- {source} — {url}" if url else f"- {source}")
             lines.append("")
+    return lines
+
+
+def _suggested_questions(questions: list[str]) -> list[str]:
+    """Render the report's follow-up questions (present on newer reports)."""
+    if not questions:
+        return []
+    lines = ["## Suggested Questions", ""]
+    lines.extend(f"- {q}" for q in questions if isinstance(q, str) and q.strip())
+    lines.append("")
+    return lines
+
+
+def _domain(url: str) -> str:
+    """Source domain (netloc) — same extraction app/core/stats.py uses for
+    distinct_sources, so this appendix's domain count matches that stat."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        return urlparse(url if "://" in url else "//" + url).netloc.lower()
+    except ValueError:
+        return ""
+
+
+def _sources(all_evidence: list[dict]) -> list[str]:
+    """Full "Sources" appendix — EVERY source gathered for the run, grouped by
+    domain. Closes the gap the inline "Evidence:" lists left (those show only the ids
+    opportunities/recommendations cited). The domain count matches
+    stats.distinct_sources and the item count matches stats.evidence_count, so the
+    markdown reconciles with the JSON's numbers while still listing every URL."""
+    if not all_evidence:
+        return []
+    by_domain: dict[str, list[tuple[str, str]]] = {}
+    seen_urls: set[str] = set()
+    for e in all_evidence:
+        url = (e.get("url") or "").strip()
+        name = (e.get("source_name") or "").strip() or "Unknown source"
+        dom = _domain(url) or name
+        key = url or f"{dom}:{name}"
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        by_domain.setdefault(dom, []).append((name, url))
+    lines = ["## Sources", "",
+             f"_{len(by_domain)} distinct source domains · {len(all_evidence)} evidence items._", ""]
+    for dom in sorted(by_domain):
+        lines.append(f"### {dom}")
+        for name, url in by_domain[dom]:
+            lines.append(f"- {name} — {url}" if url else f"- {name}")
+        lines.append("")
     return lines
 
 
