@@ -70,7 +70,13 @@ LANES = {
         # gets a genuine reasoning pass before falling back to non-reasoning
         # models. Uses its own budget key since it's a separate daily allowance
         # from the 70b-versatile row further down.
-        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_DEEPSEEK_MODEL", "deepseek-r1-distill-llama-70b"), "groq_deepseek"),
+        # NOTE: deepseek-r1-distill-llama-70b was DECOMMISSIONED by Groq (returns
+        # HTTP 400 model_decommissioned), so this lane 400'd on every call and just
+        # burned the strategist's first attempt. Switched to qwen3-32b, Groq's
+        # current reasoning model. Its <think> chain-of-thought is stripped in
+        # _repair_json. If GROQ_DEEPSEEK_MODEL is set in the env, point it at a LIVE
+        # model (e.g. qwen/qwen3-32b) — a decommissioned override re-breaks this lane.
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_DEEPSEEK_MODEL", "qwen/qwen3-32b"), "groq_reasoner"),
         ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash"), "gemini"),
         ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b"),               "cerebras"),
         ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_REASON_MODEL", "llama-3.3-70b-versatile"), "groq_70b"),
@@ -128,10 +134,21 @@ def _max_tokens(task_class: str) -> int:
 
 
 def _repair_json(text: str) -> str:
-    """Defensive parse sequence from the lessons doc: strip fences, then
-    take the outermost JSON object. Uses find/rfind slicing (linear) instead of
-    a greedy DOTALL regex, and caps length, to avoid pathological backtracking
-    on a large/unbalanced model response."""
+    """Defensive parse sequence from the lessons doc: drop reasoning-model chain-of-
+    thought, strip fences, then take the outermost JSON object. Uses find/rfind
+    slicing (linear) instead of a greedy DOTALL regex, and caps length, to avoid
+    pathological backtracking on a large/unbalanced model response.
+
+    Reasoning models (qwen3, deepseek-r1, ...) prepend their chain-of-thought in a
+    <think>...</think> block; that prose (and any braces inside it, e.g. the schema
+    it's reasoning about) corrupts the {...} slice below, so drop it first. Keep only
+    what follows the last </think>; if the tag is unclosed (reasoning truncated by
+    max_tokens) there is no JSON to recover, so drop from <think> onward and let the
+    caller fail over."""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[-1]
+    elif "<think>" in text:
+        text = text.split("<think>", 1)[0]
     text = re.sub(r"```(?:json)?", "", text).strip()[:100_000]
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
@@ -378,14 +395,20 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                         headers={"Authorization": f"Bearer {key}"},
                         json=payload,
                         timeout=TIMEOUT)
-                    # 429 = out of quota / rate-limited, 401/403 = bad or blocked
-                    # key — all key-specific. If another key exists for THIS
-                    # provider, rotate to it immediately before failing over to a
-                    # different (weaker/slower) provider.
-                    if r.status_code in (429, 401, 403):
+                    # ANY 4xx is (almost always) KEY-specific: 429 rate-limited,
+                    # 401/403 bad or blocked key, 402 out of credits, 404 model not
+                    # available on this key's tier. Rotate to the next key for THIS
+                    # provider before failing over to a weaker one — a single
+                    # out-of-credit / blocked / limited key must NOT poison the whole
+                    # provider's key list (the bug behind "1 key works, several keys
+                    # break": a bad key returning e.g. 402 used to abandon the provider
+                    # instead of trying the good keys after it). A genuine bad-request
+                    # 400 will 4xx on every key too, so we still fail over after
+                    # exhausting them — just a little slower.
+                    if 400 <= r.status_code < 500:
                         last_err = f"{name}: HTTP {r.status_code} (key {ki}/{len(keys)})"
                         if ki < len(keys):
-                            emit("router", f"{name} HTTP {r.status_code} · key {ki}/{len(keys)} exhausted · rotating key")
+                            emit("router", f"{name} HTTP {r.status_code} · key {ki}/{len(keys)} · rotating key")
                             break  # -> next key, same provider
                         # No more keys for this provider. Do NOT sleep-and-retry a
                         # rate-limited lane — under load each backoff is seconds and
