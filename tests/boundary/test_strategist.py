@@ -105,6 +105,53 @@ def test_h2h_cell_without_evidence_stays_uncited():
     assert rows[0].rivals["Ghost"].claim_ref is None                   # never faked
 
 
+# --- PR #27: _normalize_evidence_id recovers noisy-but-valid evidence ids -------
+# A weak model often echoes the right ev-id but wraps it in quotes / whitespace /
+# uppercase / trailing punctuation. Exact-match used to strip those as "unknown",
+# blanking the citation the /evidence-refs drawer needs. These lock in that the
+# recovery works AND that it can only ever return an id that truly exists.
+_HEX_INDEX = {"ev-1a2b3c4d": {"agent": "news", "competitor": "X",
+                              "type": "news", "url": "https://u/1"}}
+
+
+def test_normalize_exact_match_returns_id_unchanged():
+    assert strategist._normalize_evidence_id("ev-1a2b3c4d", _HEX_INDEX) == "ev-1a2b3c4d"
+
+
+def test_normalize_recovers_id_wrapped_in_noise():
+    for noisy in ('"ev-1a2b3c4d"', "  EV-1A2B3C4D ", "ev-1a2b3c4d.", "[ev-1a2b3c4d]",
+                  "id=ev-1a2b3c4d", "'ev-1a2b3c4d',"):
+        assert strategist._normalize_evidence_id(noisy, _HEX_INDEX) == "ev-1a2b3c4d", noisy
+
+
+def test_normalize_never_invents_a_match():
+    # well-formed id absent from the index, short/garbage, empty, and a non-string —
+    # recovery must return None, never a fabricated citation
+    assert strategist._normalize_evidence_id("ev-deadbeef", _HEX_INDEX) is None   # not in index
+    assert strategist._normalize_evidence_id("ev-short", _HEX_INDEX) is None       # too few hex chars
+    assert strategist._normalize_evidence_id("garbage", _HEX_INDEX) is None        # no ev- token
+    assert strategist._normalize_evidence_id("", _HEX_INDEX) is None
+    assert strategist._normalize_evidence_id(None, _HEX_INDEX) is None             # str()-coerced, no crash
+
+
+def test_clean_cited_recovers_noisy_citation_end_to_end():
+    # the whole point: a rec citing the right id wrapped in quotes keeps it (with
+    # confidence recomputed from the 1 recovered source), instead of being blanked
+    recs = [Recommendation(action="a", rationale="r", confidence=0.9,
+                           evidence_ids=['"ev-1a2b3c4d"'], claim_ref="rec:1")]
+    kept = strategist._clean_cited(recs, _HEX_INDEX, confidence, _noop, kind="recommendation")
+    assert kept[0].evidence_ids == ["ev-1a2b3c4d"]         # recovered, not stripped
+    assert kept[0].confidence == confidence(1, 1, 1)       # 1 source / 1 cluster / 1 agent
+
+
+def test_clean_cited_dedups_noisy_and_clean_forms_of_same_id():
+    # same id cited twice in different formatting collapses to one survivor
+    recs = [Recommendation(action="a", rationale="r", confidence=0.9,
+                           evidence_ids=["ev-1a2b3c4d", '"ev-1a2b3c4d"'], claim_ref="rec:1")]
+    kept = strategist._clean_cited(recs, _HEX_INDEX, confidence, _noop, kind="recommendation")
+    assert kept[0].evidence_ids == ["ev-1a2b3c4d"]         # deduped, not doubled
+
+
 def test_run_produces_valid_report_offline():
     # requires MOCK_MODE=1 (set by the CI/test invocation); the mock strategist
     # lane cites the evidence ids present in the prompt so a rec survives.
