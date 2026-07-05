@@ -67,6 +67,21 @@ def _key(q: str) -> str:
     return hashlib.sha256(q.lower().strip().encode()).hexdigest()[:16]
 
 
+def _keys_for(key_env: str) -> list[str]:
+    """All API keys configured for a provider, in rotation order. Mirrors
+    app.core.llm_router._keys_for: ONE env var per provider, comma-separated
+    for multiple keys (e.g. TAVILY_API_KEY=key1,key2) — one Key Vault secret
+    name per provider."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for k in os.getenv(key_env, "").split(","):
+        k = k.strip()
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys
+
+
 def _mock_results(q: str) -> list[dict]:
     return [{"title": f"Result {i} for {q}", "url": f"https://example.com/{_key(q)}/{i}",
              "content": f"(mock) market article discussing {q} — rivals, pricing, launches."}
@@ -146,28 +161,35 @@ def search_all(queries, emit=lambda a, m: None) -> list[dict]:
 
 
 def _tavily(query: str, emit) -> list[dict] | None:
-    key = os.getenv("TAVILY_API_KEY")
-    if not key:
+    keys = _keys_for("TAVILY_API_KEY")
+    if not keys:
         return None
-    try:
-        emit("search", f'"{query}" · tavily')
-        r = httpx.post("https://api.tavily.com/search",
-                       json={"api_key": key, "query": query,
-                             "max_results": config.SEARCH_MAX_RESULTS,
-                             "search_depth": config.SEARCH_DEPTH},
-                       timeout=10.0)   # was 25s — a slow provider must fail over fast
-        r.raise_for_status()
-        # Only count this as a spend against the daily budget once we know
-        # the call actually succeeded — a 4xx/5xx below never reaches here.
-        counter_incr(today_key("tavily"))
-        return [{"title": x.get("title", ""), "url": x.get("url", ""),
-                 "content": x.get("content", "")} for x in r.json().get("results", [])]
-    except httpx.HTTPStatusError as e:
-        emit("search", f"Tavily {e.response.status_code} · falling back to Serper")
-        return None
-    except httpx.HTTPError:
-        emit("search", "tavily failed · falling back to Serper")
-        return None
+    for ki, key in enumerate(keys, 1):
+        tag = f" · key {ki}/{len(keys)}" if len(keys) > 1 else ""
+        try:
+            emit("search", f'"{query}" · tavily{tag}')
+            r = httpx.post("https://api.tavily.com/search",
+                           json={"api_key": key, "query": query,
+                                 "max_results": config.SEARCH_MAX_RESULTS,
+                                 "search_depth": config.SEARCH_DEPTH},
+                           timeout=10.0)   # was 25s — a slow provider must fail over fast
+            if r.status_code in (429, 401, 403) and ki < len(keys):
+                emit("search", f"Tavily {r.status_code}{tag} exhausted · rotating key")
+                continue
+            r.raise_for_status()
+            # Only count this as a spend against the daily budget once we know
+            # the call actually succeeded — a 4xx/5xx below never reaches here.
+            counter_incr(today_key("tavily"))
+            return [{"title": x.get("title", ""), "url": x.get("url", ""),
+                     "content": x.get("content", "")} for x in r.json().get("results", [])]
+        except httpx.HTTPStatusError as e:
+            emit("search", f"Tavily {e.response.status_code} · falling back to Serper")
+            return None
+        except httpx.HTTPError:
+            emit("search", "tavily failed · falling back to Serper")
+            return None
+    emit("search", "tavily · all keys exhausted · falling back to Serper")
+    return None
 
 
 def _serper(query: str, emit) -> list[dict] | None:
@@ -175,27 +197,34 @@ def _serper(query: str, emit) -> list[dict] | None:
     # "url") and "snippet" (not "content") — mapped explicitly below so
     # callers always see the same {title, url, content} shape regardless
     # of which provider answered.
-    key = os.getenv("SERPER_API_KEY")
-    if not key:
+    keys = _keys_for("SERPER_API_KEY")
+    if not keys:
         return None
-    try:
-        emit("search", f'"{query}" · serper')
-        r = httpx.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            json={"q": query, "num": config.SEARCH_MAX_RESULTS},
-            timeout=8.0,   # was 20s
-        )
-        r.raise_for_status()
-        counter_incr(today_key("serper"))
-        return [{"title": x.get("title", ""), "url": x.get("link", ""),
-                 "content": x.get("snippet", "")} for x in r.json().get("organic", [])]
-    except httpx.HTTPStatusError as e:
-        emit("search", f"Serper {e.response.status_code} · falling back to scraper")
-        return None
-    except httpx.HTTPError:
-        emit("search", "serper failed · falling back to scraper")
-        return None
+    for ki, key in enumerate(keys, 1):
+        tag = f" · key {ki}/{len(keys)}" if len(keys) > 1 else ""
+        try:
+            emit("search", f'"{query}" · serper{tag}')
+            r = httpx.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                json={"q": query, "num": config.SEARCH_MAX_RESULTS},
+                timeout=8.0,   # was 20s
+            )
+            if r.status_code in (429, 401, 403) and ki < len(keys):
+                emit("search", f"Serper {r.status_code}{tag} exhausted · rotating key")
+                continue
+            r.raise_for_status()
+            counter_incr(today_key("serper"))
+            return [{"title": x.get("title", ""), "url": x.get("link", ""),
+                     "content": x.get("snippet", "")} for x in r.json().get("organic", [])]
+        except httpx.HTTPStatusError as e:
+            emit("search", f"Serper {e.response.status_code} · falling back to scraper")
+            return None
+        except httpx.HTTPError:
+            emit("search", "serper failed · falling back to scraper")
+            return None
+    emit("search", "serper · all keys exhausted · falling back to scraper")
+    return None
 
 
 def _extract_domain(query: str) -> str | None:
