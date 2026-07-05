@@ -109,6 +109,13 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
         emit("strategist", f"low signal: synthesis failed ({type(exc).__name__}) · degraded report")
         return _degraded(company, today, unified)
 
+    # a model sometimes writes citation ids straight into prose despite only being
+    # asked for them in evidence_ids — scrub every free-text field before it's shown
+    draft.executive_summary = _strip_inline_evidence_ids(draft.executive_summary)
+    for field in ("strengths", "weaknesses", "opportunities", "threats"):
+        setattr(draft.swot, field,
+                [_strip_inline_evidence_ids(s) for s in getattr(draft.swot, field)])
+
     # ---- code authority: clamp/recompute, then build the STRICT report ----
     recs = _clean_cited(draft.recommendations, evidence_index, confidence_fn, emit,
                         kind="recommendation")[:3]
@@ -247,10 +254,12 @@ def _coerce_h2h(raw: list, claim_by_slug: dict | None = None,
             h = H2HRow.model_validate(_coerce_h2h_cells(row))
         except Exception:  # noqa: BLE001
             continue
+        h.you = _strip_inline_evidence_ids(h.you)
         stype = _metric_type(h.metric)
         remapped: dict = {}
         for rival, cell in (h.rivals or {}).items():
             name = _match_confirmed(str(rival), rivals) or str(rival)  # keep original if unknown
+            cell.value = _strip_inline_evidence_ids(cell.value)
             if not cell.claim_ref:
                 avail = claim_by_slug.get(_slug(name), {})
                 cell.claim_ref = avail.get(stype) or _first_claim_ref(avail)
@@ -261,6 +270,19 @@ def _coerce_h2h(raw: list, claim_by_slug: dict | None = None,
 
 
 _EV_ID_RE = re.compile(r"ev-[0-9a-f]{8}")
+_INLINE_EV_RE = re.compile(r"[\(\[]?\s*ev-[0-9a-f]{8}(?:\s*[,;]\s*ev-[0-9a-f]{8})*\s*[\)\]]?")
+
+
+def _strip_inline_evidence_ids(text: str) -> str:
+    """Users should never see a raw internal 'ev-xxxxxxxx' token in prose — citations
+    belong in evidence_ids/claim_ref, which the frontend uses to drive the citation
+    drawer link. A model that ignores the prompt and writes the id straight into a
+    value/text/summary field anyway gets it stripped here (with any wrapping
+    parens/brackets) so the sentence still reads cleanly."""
+    if not text:
+        return text
+    cleaned = _INLINE_EV_RE.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" .,;:-")
 
 
 def _normalize_evidence_id(raw: str, index: dict) -> str | None:
@@ -304,6 +326,9 @@ def _clean_cited(items, index: dict, confidence_fn, emit, *, kind: str):
         it.evidence_ids = known
         if hasattr(it, "confidence"):
             it.confidence = _recompute(known, index, confidence_fn)
+        for text_field in ("text", "action", "rationale"):
+            if hasattr(it, text_field):
+                setattr(it, text_field, _strip_inline_evidence_ids(getattr(it, text_field)))
         kept.append(it)
     return kept
 
@@ -486,7 +511,10 @@ look like "ev-" followed by 8 hex characters) from the ledger line whose fact su
 your point — do not invent or guess ids, and never cite an id from these instructions. Any id you cite that is not in the ledger is stripped out, so
 cite the real ones to keep your confidence score up. Maximum 3 recommendations, each
 concrete enough to start on Monday. Put confidence at 0.5 as a placeholder; the system
-recomputes the real number from your citations and discards yours.
+recomputes the real number from your citations and discards yours. NEVER write an
+"ev-xxxxxxxx" id inside a sentence a reader will see (executive_summary, swot, head_to_head
+"you"/"value", or opportunity/recommendation prose) — ids belong ONLY in the evidence_ids
+array; readable text stays free of them.
 
 EVIDENCE LEDGER (cite these exact ids):
 {ledger}
