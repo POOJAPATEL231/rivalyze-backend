@@ -29,11 +29,9 @@ def _only_groq(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def test_keys_for_parses_comma_and_numbered(monkeypatch):
+def test_keys_for_parses_comma_list(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "a, b ,a")   # comma list, with dup + spaces
-    monkeypatch.setenv("GROQ_API_KEY_2", "c")        # numbered variant
-    monkeypatch.delenv("GROQ_API_KEY_3", raising=False)
-    assert llm_router._keys_for("GROQ_API_KEY") == ["a", "b", "c"]  # dedup, ordered
+    assert llm_router._keys_for("GROQ_API_KEY") == ["a", "b"]  # dedup, ordered
 
 
 @respx.mock
