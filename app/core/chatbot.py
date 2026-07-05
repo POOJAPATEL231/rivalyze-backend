@@ -29,6 +29,23 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONTEXT_CHARS = 8000
 
+# Questions asking about "now"/"latest" describe facts that go stale the moment
+# the stored report was written. The model is asked to set needs_live_data
+# itself, but a reasoning-lane model under a tight token budget sometimes
+# answers confidently from stale stored context instead of flagging it — so
+# back that self-classification with a keyword heuristic that forces the live
+# search step regardless of what the model decided.
+_FRESHNESS_KEYWORDS = (
+    "latest", "current", "currently", "now", "today", "this week", "this month",
+    "recent", "recently", "up to date", "up-to-date", "as of today", "just announced",
+    "stock price", "share price", "valuation",
+)
+
+
+def _needs_freshness(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in _FRESHNESS_KEYWORDS)
+
 
 def start_chat(chat_id: str, company: str, question: str, run_id: str | None) -> None:
     """Background entry point — never raises past itself (mirrors lifecycle's
@@ -172,12 +189,17 @@ def _run(chat_id: str, company: str, question: str, run_id: str | None) -> None:
         emit("system", "done")
         return
 
-    emit("chat", "found stored analysis · answering from it")
-    answer = _ask(f"You are Rivalyze's assistant. Answer the question about {company} "
-                  "using ONLY the analysis context below (a prior agent run's report, "
-                  "competitors, and signals).", context, question, emit)
+    force_live = _needs_freshness(question)
+    if force_live:
+        emit("chat", "question asks for current/latest info · searching live")
+        answer = ChatAnswer(answer="", needs_live_data=True, evidence_ids=[])
+    else:
+        emit("chat", "found stored analysis · answering from it")
+        answer = _ask(f"You are Rivalyze's assistant. Answer the question about {company} "
+                      "using ONLY the analysis context below (a prior agent run's report, "
+                      "competitors, and signals).", context, question, emit)
 
-    if not answer.needs_live_data and answer.answer.strip():
+    if not force_live and not answer.needs_live_data and answer.answer.strip():
         cited = [e for e in answer.evidence_ids if e in evidence_ids] or evidence_ids
         note = _staleness_note(context)
         final = answer.answer.strip() + (f"\n\n{note}" if note else "")
