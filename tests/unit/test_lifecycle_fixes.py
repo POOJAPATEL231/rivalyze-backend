@@ -4,10 +4,23 @@
  - a degraded run still persists an honest report shell so /reports never 404s (A1.4);
  - the poll tells '0 rivals found' apart from 'still discovering' (A1.1).
 These use the in-memory repository (no DATABASE_URL in the test env)."""
+import pytest
+
 from app.core import lifecycle
-from app.db import repository
+from app.db import connection, repository
 from app.db.repository import _MemStore
 from app.models import AnalyzeRequest, CompetitiveReport
+
+
+@pytest.fixture(autouse=True)
+def _force_memstore(monkeypatch):
+    """Pin these tests to the in-memory repository EVEN when PG*/DATABASE_URL is
+    configured. They use hardcoded job_ids ("poll-job-1", ...), so running them
+    against a real shared database inserts rows that collide on the second run
+    (UniqueViolation on runs_job_id_key) and pollute shared state. A fresh
+    _MemStore per test also isolates them from each other."""
+    monkeypatch.setattr(connection, "is_enabled", lambda: False)
+    monkeypatch.setattr(repository, "_mem", _MemStore())
 
 
 def test_degraded_report_shell_is_valid_and_carries_findings():
