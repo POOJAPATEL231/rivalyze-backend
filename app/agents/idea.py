@@ -47,45 +47,91 @@ class IdeaDomain(BaseModel):
         return v.strip() or _DEFAULT_COMPANY
 
 
-def idea_to_domain(idea: str, emit: EmitFn, *, complete_fn: Optional[CompleteFn] = None) -> IdeaDomain:
-    """One extraction call, then a code-side safety net. Never raises. complete_fn
-    is a keyword-only injection point for tests and defaults to the shared
-    model-router."""
+def idea_to_domain(idea: str, emit: EmitFn, *, context: Optional[dict] = None,
+                   complete_fn: Optional[CompleteFn] = None) -> IdeaDomain:
+    """One extraction call, then a code-side safety net. Never raises. `context` is
+    the optional structured founder intake (industry/geography/customer/model/stage,
+    a dict or None): it informs the extraction prompt AND is folded deterministically
+    into the resolved domain so discovery's geography-aware search reliably gets the
+    target market even if the model omits it. complete_fn is a keyword-only injection
+    point for tests and defaults to the shared model-router."""
     idea = (idea or "").strip()
-    if not idea:
+    has_ctx = bool(_context_lines(context))
+    if not idea and not has_ctx:
         emit("system", "idea pre-step: empty idea · heuristic fallback")
         return IdeaDomain(company=_DEFAULT_COMPANY, domain=_FALLBACK_DOMAIN)
 
     complete_fn = complete_fn or complete
 
-    emit("system", "idea pre-step: converting idea to a searchable market definition")
+    emit("system", "idea pre-step: converting idea to a searchable market definition"
+                   + (" (with founder context)" if has_ctx else ""))
     try:
-        result, lane = complete_fn("extract", _prompt(idea), IdeaDomain, emit)
+        result, lane = complete_fn("extract", _prompt(idea, context), IdeaDomain, emit)
         domain = _clamp_domain(result.domain)
-        if len(domain.split()) < 1:
+        if not domain.split() and not has_ctx:
             raise ValueError("empty domain from extraction")
         company = _strip_wrapping(result.company) or _DEFAULT_COMPANY
+        domain = _apply_context(domain, context)   # enforce geography/industry deterministically
+        if not domain.strip():
+            raise ValueError("empty domain after context")
         resolved = IdeaDomain(company=company, domain=domain)
         emit("system", f'idea pre-step: via {lane} · company="{resolved.company}" · domain="{resolved.domain}"')
         return resolved
     except Exception as exc:
         emit("system", f"idea pre-step: low signal ({type(exc).__name__}) · heuristic fallback")
-        return _heuristic_fallback(idea)
+        return _heuristic_fallback(idea, context)
 
 
-def _prompt(idea: str) -> str:
+def _ctx_get(context: Optional[dict], key: str) -> str:
+    if not context:
+        return ""
+    v = context.get(key, "") if isinstance(context, dict) else getattr(context, key, "")
+    return (v or "").strip()
+
+
+def _context_lines(context: Optional[dict]) -> str:
+    """Render the provided (non-empty) context fields as prompt bullet lines."""
+    fields = [("industry/space", "industry"), ("target geography", "target_geography"),
+              ("target customer", "target_customer"), ("business model", "business_model"),
+              ("stage", "stage")]
+    return "\n".join(f"- {label}: {_ctx_get(context, key)}"
+                     for label, key in fields if _ctx_get(context, key))
+
+
+def _apply_context(domain: str, context: Optional[dict]) -> str:
+    """Fold the highest-signal context into the market phrase deterministically, so
+    discovery's geography-aware search gets it even if the model left it out: ensure
+    the industry is present, then append the target geography (idempotent — never
+    duplicates a term already in the phrase)."""
+    domain = (domain or "").strip()
+    industry = _ctx_get(context, "industry")
+    if industry and industry.lower() not in domain.lower():
+        domain = f"{industry} {domain}".strip() if domain else industry
+    geo = _ctx_get(context, "target_geography")
+    if geo and geo.lower() not in domain.lower():
+        domain = f"{domain} in {geo}".strip()
+    return domain
+
+
+def _prompt(idea: str, context: Optional[dict] = None) -> str:
+    ctx = _context_lines(context)
+    ctx_block = (f"\nFOUNDER-PROVIDED CONTEXT (authoritative — prefer this over guessing "
+                 f"from the prose):\n{ctx}\n") if ctx else ""
+    geo = _ctx_get(context, "target_geography")
+    geo_rule = (f'\n- The market description MUST reflect "{geo}" so competitor search '
+                f"surfaces players who actually operate in that market.") if geo else ""
     return f"""Convert a startup idea into a market definition a competitor search would use.
 
 IDEA:
-{idea}
-
+{idea or "(no free-text idea — build the market definition from the founder context below)"}
+{ctx_block}
 Rules:
 - "company" is a coined, plausible two-word product name for this idea, OR the
   exact string "your venture" if no reasonable name suggests itself. Never
   return an existing real company's name.
 - "domain" is a 5-8 word market description (the kind of phrase you'd type
   into a search box to find this idea's competitors) — a product category and
-  buyer, not a restatement of the idea's prose.
+  buyer, not a restatement of the idea's prose.{geo_rule}
 - If the idea is empty, incoherent, non-English, or otherwise ungradable,
   still return your best short guess — never refuse, never return an error
   object.
@@ -107,10 +153,16 @@ def _clamp_domain(domain: str) -> str:
     return " ".join(words)
 
 
-def _heuristic_fallback(idea: str) -> IdeaDomain:
-    """No LLM result available: reduce the raw text to a short searchable phrase
-    good enough for discovery's own queries, with a last-resort default."""
-    words = re.findall(r"[a-zA-Z][a-zA-Z\-]*", idea.lower())
-    meaningful = [w for w in words if w not in _STOPWORDS] or words
-    domain = " ".join(meaningful[:_FALLBACK_WORDS]) or _FALLBACK_DOMAIN
+def _heuristic_fallback(idea: str, context: Optional[dict] = None) -> IdeaDomain:
+    """No LLM result available: build a short searchable phrase from the founder's
+    industry (best signal) or, failing that, the raw idea text — then fold in the
+    rest of the context (geography). Last-resort default keeps discovery runnable."""
+    industry = _ctx_get(context, "industry")
+    if industry:
+        base = industry
+    else:
+        words = re.findall(r"[a-zA-Z][a-zA-Z\-]*", (idea or "").lower())
+        meaningful = [w for w in words if w not in _STOPWORDS] or words
+        base = " ".join(meaningful[:_FALLBACK_WORDS])
+    domain = _apply_context(base, context) or _FALLBACK_DOMAIN
     return IdeaDomain(company=_DEFAULT_COMPANY, domain=domain)

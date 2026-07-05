@@ -1,7 +1,10 @@
 """Idea pre-step tests: no network. Covers the nasty-input cases — empty string,
 rambling text, non-English, an idea naming a real company, pure emoji — where
-every path must degrade to a sane, searchable result and never raise."""
+every path must degrade to a sane, searchable result and never raise. Plus the
+structured-intake path: founder context (industry/geography/...) must inform the
+resolved domain so idea-mode discovery is targeted, not guessed."""
 from app.agents.idea import IdeaDomain, idea_to_domain
+from app.models import AnalyzeIdeaRequest, IdeaContext
 
 
 def collector():
@@ -119,3 +122,87 @@ def test_wrapped_quotes_and_fences_are_stripped():
     )
     assert result.company == "Coined"
     assert "`" not in result.domain and '"' not in result.domain
+
+
+# ------------------------ structured founder context ------------------------
+def _ctx(**kw):
+    # matches how the orchestrator carries context: a plain dict (model_dump)
+    return IdeaContext(**kw).model_dump()
+
+
+def test_context_geography_is_folded_into_domain():
+    _, emit = collector()
+    result = idea_to_domain(
+        "an app for dog walkers to schedule and take payment", emit,
+        context=_ctx(industry="pet services", target_geography="Ahmedabad, India"),
+        complete_fn=fake_complete({"company": "PackPay", "domain": "dog walking scheduling app"}),
+    )
+    assert result.company == "PackPay"
+    assert "ahmedabad, india" in result.domain.lower()      # geography enforced -> local rivals
+
+
+def test_context_geography_is_not_duplicated():
+    _, emit = collector()
+    result = idea_to_domain(
+        "food delivery", emit,
+        context=_ctx(target_geography="India"),
+        complete_fn=fake_complete({"company": "Munch", "domain": "online food delivery in India"}),
+    )
+    assert result.domain.lower().count("india") == 1        # idempotent, not "in India in India"
+
+
+def test_context_industry_prepended_when_missing():
+    _, emit = collector()
+    result = idea_to_domain(
+        "a thing", emit,
+        context=_ctx(industry="legaltech"),
+        complete_fn=fake_complete({"company": "Lexly", "domain": "contract review tools for startups"}),
+    )
+    assert result.domain.lower().startswith("legaltech")
+
+
+def test_no_context_leaves_domain_unchanged():
+    _, emit = collector()
+    result = idea_to_domain(
+        "a scheduling tool for barbers", emit,
+        complete_fn=fake_complete({"company": "Cutly", "domain": "scheduling tools for barbershops"}),
+    )
+    assert result.domain == "scheduling tools for barbershops"   # backward-compatible
+
+
+def test_fallback_uses_context_industry_and_geography():
+    def boom(task_class, prompt, schema, emit):
+        raise RuntimeError("all lanes exhausted")
+    _, emit = collector()
+    result = idea_to_domain(
+        "😀 unparseable", emit,
+        context=_ctx(industry="fintech", target_geography="Nigeria"), complete_fn=boom,
+    )
+    assert "fintech" in result.domain.lower() and "nigeria" in result.domain.lower()
+
+
+def test_context_only_no_free_text_still_resolves():
+    _, emit = collector()
+    result = idea_to_domain(
+        "", emit,
+        context=_ctx(industry="evtol air taxis", target_geography="UAE"),
+        complete_fn=fake_complete({"company": "SkyHop", "domain": "urban air mobility"}),
+    )
+    assert result.domain.strip() and "uae" in result.domain.lower()
+
+
+# ------------------------------ request models ------------------------------
+def test_idea_request_optional_fields_map_to_context():
+    req = AnalyzeIdeaRequest(idea="an app", industry="pet care", target_geography="Ahmedabad")
+    ctx = req.to_context()
+    assert ctx.industry == "pet care" and ctx.target_geography == "Ahmedabad"
+    assert ctx.target_customer == "" and not ctx.is_empty()
+
+
+def test_bare_idea_request_is_backward_compatible():
+    assert AnalyzeIdeaRequest(idea="an app").to_context().is_empty()
+
+
+def test_idea_context_strips_control_chars_and_whitespace():
+    ctx = IdeaContext(industry="pet\x00care", target_geography="  India  ")
+    assert ctx.industry == "petcare" and ctx.target_geography == "India"

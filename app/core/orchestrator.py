@@ -305,7 +305,7 @@ def _resolve_idea(state: dict, emit: EmitFn) -> dict:
     module lazily and falling back to a heuristic if it is unavailable."""
     try:
         from app.agents.idea import idea_to_domain
-        resolved = idea_to_domain(state["idea"], emit)
+        resolved = idea_to_domain(state["idea"], emit, context=state.get("idea_context"))
         company, domain = resolved.company, resolved.domain
     except Exception as exc:
         emit("system", f"idea pre-step unavailable ({type(exc).__name__}) · heuristic fallback")

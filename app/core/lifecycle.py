@@ -197,7 +197,10 @@ def start_discovery(job_id: str, run_id: str, req: AnalyzeRequest) -> None:
         repository.update_run_status(job_id, "running_discovery", "discovery")
         emit("system", f"run {job_id} · discovery started")
         state = {"company": req.company, "domain": req.domain,
-                 "idea": req.idea, "run_id": run_id}
+                 "idea": req.idea, "run_id": run_id,
+                 # structured idea-mode intake (None in company mode); the idea
+                 # pre-step uses it to pin the market instead of guessing.
+                 "idea_context": req.idea_context.model_dump() if req.idea_context else None}
         final_state = orchestrator.run_discovery(state, _agents(), emit)
         # Idea mode: discovery resolved a real company/domain from the idea, but the
         # company row still holds the raw idea sentence. Persist the resolved identity
