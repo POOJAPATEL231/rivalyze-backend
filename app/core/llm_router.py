@@ -15,7 +15,6 @@ Base ported from the POC vertical slice. Mihir hardens this in place
 """
 import json
 import os
-import random
 import re
 import time
 
@@ -315,13 +314,12 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                         if ki < len(keys):
                             emit("router", f"{name} HTTP {r.status_code} · key {ki}/{len(keys)} exhausted · rotating key")
                             break  # -> next key, same provider
-                        if r.status_code == 429:
-                            wait = float(r.headers.get("retry-after", 0) or 0)
-                            wait = min(wait or (1.5 ** attempt + random.random()), 8.0)
-                            emit("router", f"{name} 429 · last key · backoff {wait:.1f}s")
-                            time.sleep(wait)
-                            continue  # retry the last key after backoff
-                        emit("router", f"{name} HTTP {r.status_code} · no keys left · failing over")
+                        # No more keys for this provider. Do NOT sleep-and-retry a
+                        # rate-limited lane — under load each backoff is seconds and
+                        # concurrent callers all pile up, stalling the whole run. With
+                        # several lanes, failing over IMMEDIATELY to the next provider is
+                        # both faster and likelier to succeed than waiting on this one.
+                        emit("router", f"{name} HTTP {r.status_code} · failing over")
                         next_provider = True
                         break
                     r.raise_for_status()

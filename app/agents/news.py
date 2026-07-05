@@ -50,8 +50,11 @@ def run(competitors: list[str], emit,
     month = datetime.now().strftime("%B %Y")
     if not competitors:
         return []
-    # Scan competitors CONCURRENTLY (each is an independent search+LLM); order preserved.
-    with ThreadPoolExecutor(max_workers=min(len(competitors), 5)) as ex:
+    # Scan competitors with GATHER_CONCURRENCY workers (default 1 = sequential; the
+    # per-competitor LLM work bursts rate limits, so only widen with quota headroom).
+    # Order preserved. Searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(competitors), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(lambda c: _scan_one(c, month, search_fn, complete_fn, emit), competitors))
 
 

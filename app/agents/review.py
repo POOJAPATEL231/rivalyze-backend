@@ -145,8 +145,10 @@ def run(
             _safe_emit(emit, "reviews", f"reviews · error for {competitor}: {exc}")
             return SentimentIntel(competitor=competitor, low_signal=True)
 
-    # Process competitors CONCURRENTLY (each is an independent search+LLM); order preserved.
-    with ThreadPoolExecutor(max_workers=min(len(competitors), 5)) as ex:
+    # GATHER_CONCURRENCY workers (default 1 = sequential; LLM bursts hit rate limits).
+    # Order preserved; searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(competitors), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(_one, competitors))
 
 

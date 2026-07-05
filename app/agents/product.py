@@ -75,8 +75,10 @@ def run(competitors: list, emit, company: str = "") -> list[dict]:
             emit("product", f"low signal: {name} · {type(e).__name__}")
             return _low_signal(name).model_dump()
 
-    # Process competitors CONCURRENTLY (each is an independent search+LLM); order preserved.
-    with ThreadPoolExecutor(max_workers=min(len(names), 5)) as ex:
+    # GATHER_CONCURRENCY workers (default 1 = sequential; LLM bursts hit rate limits).
+    # Order preserved; searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(names), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(_one, names))
 
 
