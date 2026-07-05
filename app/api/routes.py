@@ -85,7 +85,12 @@ def get_run(job_id: str) -> RunStatus:
 
 
 @router.post("/runs/{job_id}/confirm", response_model=AnalyzeResponse, status_code=202,
-             dependencies=[Depends(require_token)])
+             dependencies=[Depends(require_token)],
+             responses={
+                 404: {"description": "job not found"},
+                 409: {"description": "run is not awaiting confirmation "
+                                       "(already confirmed, still discovering, or completed)"},
+             })
 def confirm(job_id: str, req: ConfirmRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
     """Phase 2 launch. Validates the run exists AND is awaiting_confirmation, then
     persists the user-edited competitor list and kicks off the analysis graph."""
