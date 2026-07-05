@@ -167,7 +167,8 @@ class _MemStore:
                 continue
             out.append({"job_id": r["job_id"], "company": name,
                         "threat_level": r["threat_level"], "confidence": r["report_confidence"],
-                        "created_at": r["finished_at"] or r["started_at"]})
+                        "created_at": r["finished_at"] or r["started_at"],
+                        "company_id": r["company_id"], "run_id": r["id"]})
             if len(out) >= limit:
                 break
         return out
@@ -654,7 +655,8 @@ def get_signals_for_run(run_id: str) -> list[dict]:
 _HISTORY_BASE = """
     SELECT r.job_id, c.name AS company, r.threat_level,
            r.report_confidence AS confidence,
-           COALESCE(r.finished_at, r.started_at) AS created_at
+           COALESCE(r.finished_at, r.started_at) AS created_at,
+           c.id::text AS company_id, r.id::text AS run_id
     FROM runs r
     JOIN companies c ON c.id = r.company_id
     WHERE r.status = 'completed'
