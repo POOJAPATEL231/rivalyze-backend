@@ -419,3 +419,52 @@ class RefreshRequest(BaseModel):
 class UserPublic(BaseModel):
     user_id: str
     email: EmailStr
+
+
+# ================================== chat ==================================
+class ChatRequest(BaseModel):
+    """POST /api/v1/chat — ask a question about a company the agents may
+    already have analyzed. `run_id` optionally pins the answer to one specific
+    run's report instead of the company's latest completed one."""
+    company: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    run_id: Optional[str] = None
+
+    @field_validator("company", "question")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+class ChatResponse(BaseModel):
+    chat_id: str
+    status: str
+
+
+class ChatEvent(BaseModel):
+    t: float
+    agent: str  # chat | search | router | system
+    msg: str
+
+
+class ChatAnswer(BaseModel):
+    """LLM output schema for both the stored-context pass and the live-search
+    pass. needs_live_data lets the model itself signal "the context I was
+    given doesn't cover this" so chatbot.py knows to fall back to live search
+    without a second, separate classification call."""
+    answer: str = ""
+    needs_live_data: bool = False
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ChatStatus(BaseModel):
+    """Poll shape for GET /api/v1/chat/{chat_id}."""
+    chat_id: str
+    status: Literal["processing", "completed", "failed"]
+    events: list[ChatEvent] = Field(default_factory=list)
+    answer: Optional[str] = None
+    source: Optional[Literal["stored", "live", "mixed"]] = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
