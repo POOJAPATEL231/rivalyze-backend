@@ -14,6 +14,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ..models import Competitor, CompetitorSet
+from ..core import config
 from ..core import search_chain as search_mod
 from ..core import llm_router
 
@@ -34,6 +35,11 @@ class _Extraction(BaseModel):
 GENERIC_GIANTS = {"google", "amazon", "youtube", "microsoft", "meta", "tcs",
                    "infosys", "wipro", "accenture", "reliance"}
 
+# Minimum corpus size before we trust an extraction (mirrors news/product/review).
+# Below this there isn't enough evidence for an honest answer, so a weak lane would
+# just fabricate competitors — degrade to empty instead.
+_LOW_SIGNAL_THRESHOLD = 300
+
 
 def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
     """Discover up to 4 competitors for `company` in `domain`.
@@ -51,8 +57,12 @@ def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
     result = CompetitorSet(competitors=[])
     try:
         corpus = _build_corpus(company, domain, month, emit)
-        if not corpus.strip():
-            emit("discovery", "no search results returned · low signal")
+        # Minimum-corpus guard (parity with news/product/review). Without it, a
+        # near-empty corpus (one thin snippet) still went to extraction, and a weak
+        # lane would INVENT 4 plausible competitors from almost nothing — junk that
+        # then seeds the whole pipeline. Below the threshold we degrade to empty.
+        if len(corpus.strip()) < _LOW_SIGNAL_THRESHOLD:
+            emit("discovery", f"thin corpus ({len(corpus.strip())} chars) · low signal, skipping extraction")
         else:
             prompt = _build_prompt(company, domain, corpus)
             extracted, lane = llm_router.complete("extract", prompt, _Extraction, emit)
@@ -70,16 +80,19 @@ def run(company: str, domain: str, run_id: str, emit) -> CompetitorSet:
 def _build_corpus(company: str, domain: str, month: str, emit) -> str:
     q1 = f"top competitors of {company} in {domain} {month}".strip()
     q2 = f"alternatives to {company} {domain} {month}".strip()
+    # q3 surfaces the company's home MARKET/geography/size so the extractor can
+    # prefer same-market rivals (e.g. an Indian company -> Indian competitors).
+    q3 = f"{company} {domain} market competitors headquarters country".strip()
 
     corpus = ""
-    for q in (q1, q2):
-        for r in search_mod.search(q, emit):
-            # defensive .get(): a search provider row missing a key must not
-            # raise here (discovery's contract is to never raise).
-            title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
-            corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
+    # search the 3 queries CONCURRENTLY (independent I/O) instead of one-after-another.
+    for r in search_mod.search_all((q1, q2, q3), emit):
+        # defensive .get(): a search provider row missing a key must not
+        # raise here (discovery's contract is to never raise).
+        title, content, url = r.get("title", ""), r.get("content", ""), r.get("url", "")
+        corpus += f"{title}\n{content}\nSOURCE: {url}\n\n"
 
-    return corpus[:6000]  # prompt budget cap (v2 §4.6)
+    return corpus[:config.CORPUS_CAP]  # prompt budget cap (6000 default, 12000 under RICH_SEARCH)
 
 
 def _build_prompt(company: str, domain: str, corpus: str) -> str:
@@ -90,6 +103,12 @@ Rules:
 - Same business model only. Exclude generic giants (Google, YouTube, Amazon,
   TCS-class conglomerates) unless they compete with an equivalent product
   (e.g. "Google Docs" is valid against a docs tool, "Google" alone is not).
+- GEOGRAPHY & SIZE: First infer {company}'s home market from the results (which
+  country/region it primarily operates in, and its rough size/stage). PRIORITISE
+  rivals that operate in that SAME market and are of a comparable size/stage — an
+  Indian company competes first with Indian/regional players, not US-only ones.
+  Include a global/foreign player ONLY if the results show it genuinely competes
+  in {company}'s market. The rationale must name the shared market/segment.
 - Never include {company} itself.
 - "category" is "direct" or "indirect". "rationale" is one short sentence.
 - Maximum 4. If the results support fewer, return fewer — do not invent.

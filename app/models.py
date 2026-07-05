@@ -41,7 +41,9 @@ class NewsItem(BaseModel):
 
 class NewsSignals(BaseModel):
     competitor: str
-    items: list[NewsItem] = Field(default_factory=list, max_length=4)
+    # The report keeps ALL grounded events; the frontend decides how many to show
+    # (top 6). max_length is a generous DoS ceiling on LLM output, not a display cap.
+    items: list[NewsItem] = Field(default_factory=list, max_length=10)
     low_signal: bool = False
 
 
@@ -59,8 +61,10 @@ class ProductIntel(BaseModel):
 # ============================ domain: reviews =============================
 class SentimentIntel(BaseModel):
     competitor: str
-    top_complaints: list[str] = Field(default_factory=list, max_length=3)
-    opportunity_gaps: list[str] = Field(default_factory=list, max_length=3)
+    # Report keeps all mined complaints/gaps; frontend truncates for display.
+    # max_length is a generous DoS ceiling on LLM output, not a display cap.
+    top_complaints: list[str] = Field(default_factory=list, max_length=8)
+    opportunity_gaps: list[str] = Field(default_factory=list, max_length=8)
     overall_sentiment: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"] = "NEUTRAL"
     sources: list[str] = Field(default_factory=list)
     low_signal: bool = False
@@ -133,6 +137,27 @@ class H2HRow(BaseModel):
     rivals: dict[str, H2HCell] = Field(default_factory=dict)
 
 
+class ReportStats(BaseModel):
+    """Deterministic "By the numbers" aggregates (app/core/stats.py). Every field is
+    a COUNT / GROUP BY of evidence + signals rows already stored this run — no
+    estimates, so it can't hallucinate. Additive & optional: absent on older reports
+    and on degraded runs, so old renderers ignore it and the report validates without
+    it. Rates are None (not 0) when their denominator is empty."""
+
+    evidence_count: int = 0                                          # total evidence rows
+    competitors_analyzed: int = 0
+    sources_per_competitor: dict[str, int] = Field(default_factory=dict)
+    source_type_breakdown: dict[str, int] = Field(default_factory=dict)  # the donut; sums to evidence_count
+    signals_by_type: dict[str, int] = Field(default_factory=dict)
+    competitors_with_complaints: int = 0                            # <= competitors_analyzed
+    sentiment_spread: dict[str, int] = Field(default_factory=dict)  # {POSITIVE,NEUTRAL,NEGATIVE}
+    avg_confidence: Optional[float] = None                          # mean rec confidence, 0-1 (None if no recs)
+    freshest_signal_days: Optional[int] = None                     # age of newest dated evidence (None if undated)
+    distinct_sources: int = 0                                       # distinct source domains across all evidence
+    corroboration_rate: Optional[int] = None                       # % of claims with 2+ INDEPENDENT sources (None if no claims)
+    uncorroborated_claims: int = 0                                 # claims resting on a single source
+
+
 class CompetitiveReport(BaseModel):
     company: str
     threat_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -144,6 +169,7 @@ class CompetitiveReport(BaseModel):
     recommendations: list[Recommendation] = Field(default_factory=list, max_length=3)
     low_signal_findings: list[str] = Field(default_factory=list)
     analysis_date: str
+    stats: Optional[ReportStats] = None  # additive "By the numbers" strip; None on degraded/old runs
 
 
 # ========================= API / run lifecycle ==========================
@@ -161,6 +187,39 @@ class AnalyzeRequest(BaseModel):
         if v is None:
             return v
         return "".join(ch for ch in v if ch.isprintable()).strip()
+
+
+class AnalyzeCompanyRequest(BaseModel):
+    """POST /api/v1/analyze/company — company + domain mode."""
+
+    company: str = Field(min_length=1, max_length=200)
+    domain: str = Field(min_length=1, max_length=200)
+
+    @field_validator("company", "domain")
+    @classmethod
+    def _strip_control_chars(cls, v: str) -> str:
+        return "".join(ch for ch in v if ch.isprintable()).strip()
+
+    @field_validator("company", "domain")
+    @classmethod
+    def _nonblank(cls, v: str) -> str:
+        if not v:
+            raise ValueError("must not be blank")
+        return v
+
+
+class AnalyzeIdeaRequest(BaseModel):
+    """POST /api/v1/analyze/idea — idea mode: a pre-step infers company + domain."""
+
+    idea: str = Field(min_length=1, max_length=500)
+
+    @field_validator("idea")
+    @classmethod
+    def _strip_control_chars(cls, v: str) -> str:
+        v = "".join(ch for ch in v if ch.isprintable()).strip()
+        if not v:
+            raise ValueError("idea must not be blank")
+        return v
 
 
 class AnalyzeResponse(BaseModel):
@@ -226,13 +285,19 @@ class EvidenceResponse(BaseModel):
 class HistoryEntry(BaseModel):
     """One row of GET /api/v1/history. threat_level/confidence are optional:
     a completed run persisted before the strategist agent existed (or any
-    run finished via finish_run(job_id) with no report yet) has neither."""
+    run finished via finish_run(job_id) with no report yet) has neither.
+
+    has_new (Monitor Delta): True ONLY on a company's newest row when its
+    latest run carries signals the previous run didn't — the frontend's "new
+    changes" popup trigger. Older rows / first-run companies stay False.
+    Details come from GET /api/v1/companies/{slug}/delta."""
 
     job_id: str
     company: str
     threat_level: Optional[str] = None
     confidence: Optional[float] = None
     created_at: datetime
+    has_new: bool = False
 
 
 class DeltaSignal(BaseModel):

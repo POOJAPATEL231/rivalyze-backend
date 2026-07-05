@@ -14,12 +14,15 @@ poller NEVER sees a 500 or a stack trace. The process owns NOTHING durable
 """
 import logging
 import re
+import threading
 import time
 import uuid
+from datetime import datetime
 
 from fastapi import BackgroundTasks
 
 from ..agents import discovery
+from ..core import config
 from ..core import confidence as confidence_mod
 from ..core import llm_router  # noqa: F401  (imported so MOCK env is resolved eagerly)
 from ..core import merge as merge_mod
@@ -30,10 +33,16 @@ from ..models import (
     AnalyzeRequest,
     AnalyzeResponse,
     Competitor,
+    CompetitiveReport,
     CompetitorSet,
     RunEvent,
     RunStatus,
+    Swot,
 )
+
+# Statuses at/after which discovery has finished — used to tell "discovery done,
+# 0 rivals found" apart from "still discovering" in the poll shape.
+_DISCOVERY_DONE = {"awaiting_confirmation", "confirmed", "running_analysis", "completed"}
 
 logger = logging.getLogger(__name__)
 
@@ -65,29 +74,83 @@ def _slug(text: str) -> str:
     return s[:24] or "idea"
 
 
+# Header metric keys the UI shows (LLM CALLS / SEARCHES / SIGNALS FOUND). Tracked
+# per-run and persisted LIVE so the counters tick up during the run, not just at end.
+_METRIC_KEYS = ("llm_calls", "searches", "cache_hits", "signals_found", "evidence_rows")
+
+
 def _emitter(job_id: str):
-    """A DB-backed event emitter closed over the run's start time, plus a live
-    lane_stats accumulator. Returns (emit, lane_stats, t0)."""
+    """A DB-backed event emitter plus a LIVE per-run metrics accumulator.
+
+    Returns (emit, stats, t0). `stats` carries both per-lane attempt counts and the
+    header metrics (llm_calls / searches / cache_hits / signals_found / evidence_rows)
+    and is written to the run row on every change, so the UI's live counters update
+    mid-run instead of staying 0 until the end. Phase 2 SEEDS from Phase 1's stats so
+    counts accumulate across phases rather than the second phase overwriting the first.
+    """
     t0 = time.time()
-    lane_stats: dict[str, int] = {}
+    # search_chain.stats is a process-global cumulative counter; snapshot it so the
+    # DELTA is attributed to THIS run (exact for the typical one-run-at-a-time case).
+    search_base = dict(search_mod.stats)
+    existing = (repository.get_run(job_id) or {}).get("lane_stats") or {}
+    stats: dict[str, int] = {k: int(v) for k, v in existing.items() if isinstance(v, (int, float))}
+    for k in _METRIC_KEYS:
+        stats.setdefault(k, 0)
+    prior_searches, prior_cache = stats["searches"], stats["cache_hits"]
+    # emit() is now called CONCURRENTLY (agents parallelise competitors/searches), so
+    # guard the counters with a lock, and THROTTLE the DB write so bursts of events
+    # don't hammer Postgres — the poll is every ~2s, so ~1.5s granularity is plenty.
+    lock = threading.Lock()
+    last_flush = [0.0]
+
+    def _flush() -> None:
+        # throttle-check, timestamp, and snapshot all under the lock so two threads
+        # can't both pass the gate (duplicate write) or copy stats mid-mutation. The
+        # DB write itself runs OUTSIDE the lock — never hold the lock across I/O.
+        with lock:
+            if time.time() - last_flush[0] < 1.5:
+                return
+            last_flush[0] = time.time()
+            snapshot = dict(stats)
+        try:
+            repository.set_lane_stats(job_id, snapshot)
+        except Exception:  # noqa: BLE001 — a live-metric write must never break the run
+            pass
 
     def emit(agent: str, msg: str) -> None:
+        # append_events is an atomic jsonb concat at the DB, safe under concurrency.
         repository.append_events(
             job_id, [{"t": round(time.time() - t0, 1), "agent": agent, "msg": msg}]
         )
-        if agent == "router":
-            lane = msg.split("/")[0].split()[0]
-            lane_stats[lane] = lane_stats.get(lane, 0) + (1 if "attempt" in msg or "MOCK" in msg else 0)
+        changed = False
+        with lock:
+            if agent == "router" and ("attempt" in msg or "MOCK" in msg):
+                stats["llm_calls"] += 1
+                lane = msg.split("/")[0].split()[0]
+                stats[lane] = int(stats.get(lane, 0)) + 1
+                changed = True
+            elif agent == "search":
+                stats["searches"] = prior_searches + (search_mod.stats["searches"] - search_base["searches"])
+                stats["cache_hits"] = prior_cache + (search_mod.stats["cache_hits"] - search_base["cache_hits"])
+                changed = True
+            elif agent == "merge":
+                m = re.search(r"fused\s+(\d+)\s+signals.*?(\d+)\s+evidence", msg)
+                if m:
+                    stats["signals_found"], stats["evidence_rows"] = int(m.group(1)), int(m.group(2))
+                    changed = True
+        if changed:
+            _flush()
 
-    return emit, lane_stats, t0
+    return emit, stats, t0
 
 
 def _persist_lane_stats(job_id: str, lane_stats: dict) -> None:
-    repository.set_lane_stats(job_id, {
-        **lane_stats,
-        "searches": search_mod.stats["searches"],
-        "cache_hits": search_mod.stats["cache_hits"],
-    })
+    """Final durable flush of the run's stats (they are already written live by the
+    emitter; this just guarantees the last values land)."""
+    try:
+        repository.set_lane_stats(job_id, dict(lane_stats))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _report_confidence(report: dict) -> float | None:
@@ -135,7 +198,16 @@ def start_discovery(job_id: str, run_id: str, req: AnalyzeRequest) -> None:
         emit("system", f"run {job_id} · discovery started")
         state = {"company": req.company, "domain": req.domain,
                  "idea": req.idea, "run_id": run_id}
-        orchestrator.run_discovery(state, _agents(), emit)
+        final_state = orchestrator.run_discovery(state, _agents(), emit)
+        # Idea mode: discovery resolved a real company/domain from the idea, but the
+        # company row still holds the raw idea sentence. Persist the resolved identity
+        # so Phase 2 (which re-reads the company from Postgres) stamps the report with
+        # the company name, not the whole idea paragraph.
+        if (req.idea or "").strip() and not (req.company or "").strip():
+            resolved = (final_state or {}).get("company")
+            if resolved and resolved.strip() and resolved.strip() != (req.idea or "").strip():
+                repository.set_run_company(run_id, resolved.strip(),
+                                           (final_state or {}).get("domain") or "")
         _persist_lane_stats(job_id, lane_stats)
         repository.update_run_status(job_id, "awaiting_confirmation", "awaiting_confirmation")
         emit("system", f"discovery complete in {time.time() - t0:.1f}s · awaiting confirmation")
@@ -160,23 +232,54 @@ def start_analysis(job_id: str, run_id: str, confirmed: list[dict]) -> None:
 
         report = final.get("report")
         report_dict = report.model_dump() if hasattr(report, "model_dump") else report
-        if report_dict:
-            repository.save_report(run_id, report_dict)
-            repository.finish_run(job_id, report_dict.get("threat_level"),
-                                  _report_confidence(report_dict))
-            emit("system", f"report ready · threat={report_dict.get('threat_level')}")
-        else:
-            # Degraded run: no valid report survived validation. Still a completed
-            # run (never a 500), just without a persisted CompetitiveReport.
-            repository.finish_run(job_id)
-            emit("system", "analysis completed with degraded (empty) report")
-
-        _persist_lane_stats(job_id, lane_stats)
-        emit("system", f"completed in {time.time() - t0:.1f}s")
+        if not report_dict:
+            # Degraded run: no valid report survived validation. Persist an HONEST
+            # shell (not nothing) so GET /reports/{run_id} returns 200 with an
+            # "insufficient signal" report instead of a 404 dead-end — the poll
+            # exposes run_id for any completed run.
+            report_dict = _degraded_report_shell(company, final)
+            emit("system", "analysis completed with degraded (low-signal) report")
+        repository.save_report(run_id, report_dict)
+        repository.finish_run(job_id, report_dict.get("threat_level"),
+                              _report_confidence(report_dict))
     except Exception:
         logger.exception("analysis %s failed", job_id)
         repository.fail_run(job_id, "internal pipeline error")
         emit("system", "failed: internal error")
+        return
+
+    # Post-completion bookkeeping. The run is ALREADY completed+persisted; a failure
+    # here (a transient DB blip on the event/lane-stats write) must NOT flip a good,
+    # report-bearing run to "failed" — which would strand the UI away from a report
+    # that is sitting in the DB. So it runs outside the try above and is swallowed.
+    try:
+        # Optional report-quality scoring (adopted from rivalyze-dev). Best-effort,
+        # OFF by default (one extra LLM call); the score rides in lane_stats.
+        if config.REPORT_EVAL:
+            from ..core import report_eval
+            scores = report_eval.evaluate(report_dict, company, emit)
+            if scores:
+                lane_stats["report_score"] = scores["overall_score"]
+        _persist_lane_stats(job_id, lane_stats)
+        emit("system", f"report ready · completed in {time.time() - t0:.1f}s")
+    except Exception:  # noqa: BLE001 — cosmetic; the run is already completed
+        logger.warning("analysis %s: post-completion bookkeeping failed (run already completed)", job_id)
+
+
+def _degraded_report_shell(company: str, final: dict) -> dict:
+    """A minimal, honest CompetitiveReport for a run whose synthesis degraded — so
+    the report route returns 200 with a clear 'insufficient signal' message and the
+    low_signal_findings, instead of the UI hitting a 404 on a 'completed' run."""
+    findings = list(final.get("low_signal_findings") or [])
+    return CompetitiveReport(
+        company=company or "our company",
+        threat_level="MEDIUM",
+        executive_summary=("This analysis could not gather enough signal to produce a full "
+                           "competitive report. Please try again, or re-run with different rivals."),
+        swot=Swot(), sentiment={}, head_to_head=[], opportunities=[], recommendations=[],
+        low_signal_findings=findings or ["analysis: degraded run — insufficient signal"],
+        analysis_date=datetime.now().strftime("%Y-%m-%d"),
+    ).model_dump()
 
 
 # ===================================== poll =====================================
@@ -192,7 +295,15 @@ def get_run(job_id: str) -> RunStatus | None:
     if row is None:
         return None
     competitors = repository.get_competitors(row["id"])
-    result = CompetitorSet(competitors=[Competitor(**c) for c in competitors]) if competitors else None
+    if competitors:
+        result = CompetitorSet(competitors=[Competitor(**c) for c in competitors])
+    elif row["status"] in _DISCOVERY_DONE:
+        # Discovery finished but found 0 rivals: return an EMPTY set (not None) so the
+        # UI can tell "done, none found — add your own" apart from "still discovering",
+        # and isn't stranded at awaiting_confirmation with an ambiguous null result.
+        result = CompetitorSet(competitors=[])
+    else:
+        result = None
     return RunStatus(
         job_id=row["job_id"],
         status=row["status"],

@@ -12,10 +12,13 @@ Owner: Tushar
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from app.core import config
 from app.core.llm_router import complete
-from app.core.search_chain import search
+from app.core.search_chain import search_all
+from app.core.grounding import ground_sources
 from app.models import ProductIntel
 
 logger = logging.getLogger(__name__)
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Computed once at import time (not per-call) — "July 2026" stays correct for
 # the whole hackathon; see plan doc gotcha #7.
 _MONTH = datetime.now().strftime("%B %Y")
-_CORPUS_CAP = 5000
+_CORPUS_CAP = config.CORPUS_CAP    # 6500, or 12000 under RICH_SEARCH
 _LOW_SIGNAL_THRESHOLD = 300
 
 # Bare-JSON system prompt. The "PLAIN STRINGS" + wrong-example line is the
@@ -57,20 +60,26 @@ def run(competitors: list, emit, company: str = "") -> list[dict]:
     entry). `competitors` items may be plain name strings or dicts with a
     "name" key (LangGraph orchestrator format).
     """
-    results = []
-    for item in competitors:
-        name = item if isinstance(item, str) else item.get("name", str(item))
+    names = [item if isinstance(item, str) else item.get("name", str(item)) for item in competitors]
+    if not names:
+        return []
+
+    def _one(name: str) -> dict:
         try:
-            intel = _process(name, company, emit)
+            return _process(name, company, emit).model_dump()
         except Exception as e:
             # Per-competitor guard: a search-chain crash or any unexpected error
             # for ONE rival degrades only that rival to low_signal — it never
             # raises out of run() and never drops the rest of the batch.
             logger.warning("product: unhandled error for %s: %s", name, e)
             emit("product", f"low signal: {name} · {type(e).__name__}")
-            intel = _low_signal(name)
-        results.append(intel.model_dump())
-    return results
+            return _low_signal(name).model_dump()
+
+    # GATHER_CONCURRENCY workers (default 1 = sequential; LLM bursts hit rate limits).
+    # Order preserved; searches WITHIN each competitor are always parallel.
+    workers = max(1, min(len(names), config.GATHER_CONCURRENCY))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(_one, names))
 
 
 def _process(competitor: str, company: str, emit) -> ProductIntel:
@@ -90,6 +99,10 @@ def _process(competitor: str, company: str, emit) -> ProductIntel:
         # drift on capitalization ("click up" vs "ClickUp"); the caller's
         # input string is always authoritative here, not the model's output.
         result.competitor = competitor
+        # Drop any source URL the model invented — keep only those that appear
+        # verbatim in the corpus, so every evidence row is a real, retrievable
+        # source (parity with the news agent's grounding).
+        result.sources = ground_sources(result.sources, corpus)
         emit("product", f"{competitor} · {len(result.pricing_tiers)} tiers via {lane}")
         return result
     except RuntimeError as e:
@@ -109,16 +122,19 @@ def _build_corpus(competitor: str, company: str, emit) -> str:
         # only fired when we actually know our own company name.
         queries.append(f"{competitor} vs {company} comparison {_MONTH}")
     queries.append(f"{competitor} new features product update 2026")
+    # Positioning/target-segment angle — feeds the "Market Position" and
+    # "Target Segment" head-to-head rows the strategist now asks for.
+    queries.append(f"{competitor} target market customers positioning")
 
     seen_urls: set[str] = set()
     parts: list[str] = []
-    for q in queries:
-        for item in search(q, emit):
-            url = item.get("url", "")
-            if url and url in seen_urls:
-                continue
-            seen_urls.add(url)
-            parts.append(f"{item.get('title', '')}\n{item.get('content', '')}\nSOURCE: {url}\n")
+    # search all query angles CONCURRENTLY, then dedup by url.
+    for item in search_all(queries, emit):
+        url = item.get("url", "")
+        if url and url in seen_urls:
+            continue
+        seen_urls.add(url)
+        parts.append(f"{item.get('title', '')}\n{item.get('content', '')}\nSOURCE: {url}\n")
 
     return "\n".join(parts)[:_CORPUS_CAP]
 

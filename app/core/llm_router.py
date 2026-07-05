@@ -15,7 +15,6 @@ Base ported from the POC vertical slice. Mihir hardens this in place
 """
 import json
 import os
-import random
 import re
 import time
 
@@ -54,6 +53,19 @@ LANES = {
 }
 ATTEMPTS_PER_LANE = 2
 TIMEOUT = 45.0
+
+# Response-size budget per task class. Extraction outputs are small (a handful of
+# typed items); the strategist's CompetitiveReport is large — full SWOT, sentiment
+# per rival, 4-6 verbose head-to-head rows, opportunities AND recommendations. At
+# the old flat 1024 the report was TRUNCATED mid-JSON: _repair_json salvaged only
+# up to the last complete "}", silently dropping opportunities/recommendations (the
+# final fields) — the #1 cause of empty recommendations. Reasoning gets a much
+# larger budget; extraction a modest bump for the now-richer agent outputs.
+_MAX_TOKENS = {"reason": 4096, "extract": 1536}
+
+
+def _max_tokens(task_class: str) -> int:
+    return _MAX_TOKENS.get(task_class, 1536)
 
 
 def _repair_json(text: str) -> str:
@@ -114,15 +126,14 @@ def _mock_completion(prompt: str) -> str:
     if "RIVALYZE_STRATEGIST" in prompt:
         # Strategist (reason lane). Must be sniffed BEFORE the discovery branch —
         # this prompt also contains the word "competitors". Parse the rival names
-        # and the real EVIDENCE_IDS out of the prompt so the mock cites ids that
-        # actually exist (strategist.py drops recs citing unknown ids); the report
-        # then survives the validate node and confidence is code-recomputed.
+        # and a real ev- id out of the prompt so the mock cites an id that actually
+        # exists; confidence is then code-recomputed from it.
         m = re.search(r"COMPETITORS:\s*(.+)", prompt)
         rivals = [r.strip() for r in m.group(1).split(",")] if m else []
         rivals = [r for r in rivals if r and "none" not in r.lower()]
-        m = re.search(r"EVIDENCE_IDS:\s*(.+)", prompt)
-        ids = [i.strip() for i in m.group(1).split(",")] if m else []
-        cite = [i for i in ids if i.startswith("ev-")][:1]
+        # ev- ids now live in the EVIDENCE LEDGER (the flat EVIDENCE_IDS: line was
+        # removed when the ledger replaced it) — pull one straight from the ledger.
+        cite = re.findall(r"ev-[0-9a-f]+", prompt)[:1]
         first = rivals[0] if rivals else "the leading rival"
         return json.dumps({
             "company": "mock",
@@ -150,6 +161,10 @@ def _mock_completion(prompt: str) -> str:
                  "confidence": 0.5, "evidence_ids": cite, "claim_ref": "rec:bundle-ai"}],
             "low_signal_findings": [],
             "analysis_date": "2026-01-01"})
+    if "STRICT evaluator" in prompt:
+        # report_eval scoring (reason lane) — return plausible scores offline.
+        return json.dumps({"completeness": 8, "accuracy": 7, "strategic_value": 8,
+                           "actionability": 7, "overall_score": 7.5})
     if "competitors" in prompt.lower():
         company = "the company"
         m = re.search(r"competitors of (.+?) in", prompt)
@@ -167,13 +182,17 @@ def _mock_completion(prompt: str) -> str:
         # re-stamps it with the caller's known-good name after validation —
         # validation itself happens before that stamp, so this placeholder
         # just needs to satisfy the schema, not be accurate.
+        # Pull a real SOURCE url from the corpus (like the news mock): product.py
+        # now grounds sources against the corpus, so an invented url would be
+        # stripped and MOCK-mode evidence would come back empty.
+        src = re.findall(r"SOURCE:\s*(https?://\S+)", prompt)[:1]
         return json.dumps({
             "competitor": "mock",
             "pricing_tiers": ["Pro $12/seat: AI included (mock)"],
             "recent_features": ["AI formulas v2 (mock)"],
             "positioning": "docs-as-apps for power teams (mock)",
             "advantages": ["cheaper at small team size (mock)"],
-            "sources": ["https://example.com/mock-source"],
+            "sources": src,
         })
     if "source_url" in prompt:
         # News extraction (_NewsExtraction: {"items": [NewsItem]}).
@@ -199,12 +218,14 @@ def _mock_completion(prompt: str) -> str:
         # validation (same pattern as the product-agent branch above) —
         # validation happens before that stamp, so this placeholder only
         # needs to satisfy the schema, not be accurate.
+        # Pull a real SOURCE url from the corpus (review.py now grounds sources).
+        src = re.findall(r"SOURCE:\s*(https?://\S+)", prompt)[:1]
         return json.dumps({
             "competitor": "mock",
             "top_complaints": ["feature overload (mock)"],
             "opportunity_gaps": ["ship a lightweight tier (mock)"],
             "overall_sentiment": "NEUTRAL",
-            "sources": ["https://example.com/mock-source"],
+            "sources": src,
         })
     return json.dumps({"answer": "mock"})
 
@@ -267,7 +288,7 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                 try:
                     emit("router", f"{name}/{model} · attempt {attempt}{tag}")
                     payload = {"model": model, "temperature": 0.1,
-                               "max_tokens": 1024,  # bound response size/latency/cost
+                               "max_tokens": _max_tokens(task_class),  # task-aware: reason needs room for the full report
                                "response_format": {"type": "json_object"},
                                "messages": [
                                    {"role": "system",
@@ -293,17 +314,29 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                         if ki < len(keys):
                             emit("router", f"{name} HTTP {r.status_code} · key {ki}/{len(keys)} exhausted · rotating key")
                             break  # -> next key, same provider
-                        if r.status_code == 429:
-                            wait = float(r.headers.get("retry-after", 0) or 0)
-                            wait = min(wait or (1.5 ** attempt + random.random()), 8.0)
-                            emit("router", f"{name} 429 · last key · backoff {wait:.1f}s")
-                            time.sleep(wait)
-                            continue  # retry the last key after backoff
-                        emit("router", f"{name} HTTP {r.status_code} · no keys left · failing over")
+                        # No more keys for this provider. Do NOT sleep-and-retry a
+                        # rate-limited lane — under load each backoff is seconds and
+                        # concurrent callers all pile up, stalling the whole run. With
+                        # several lanes, failing over IMMEDIATELY to the next provider is
+                        # both faster and likelier to succeed than waiting on this one.
+                        emit("router", f"{name} HTTP {r.status_code} · failing over")
                         next_provider = True
                         break
                     r.raise_for_status()
-                    raw = r.json()["choices"][0]["message"]["content"]
+                    # Extract the text defensively: a 200 with an unexpected body
+                    # shape (missing choices/message, content=None on a refusal,
+                    # or non-JSON) must fail over — NOT raise an uncaught
+                    # KeyError/IndexError out of complete() that skips failover and
+                    # zeroes the caller's result (this crashed strategist/reviews).
+                    try:
+                        raw = r.json()["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        raw = None
+                    if not raw:
+                        last_err = f"{name}: empty/malformed response body"
+                        emit("router", f"{name} malformed response · failing over")
+                        next_provider = True
+                        break
                     try:
                         return schema.model_validate_json(_repair_json(raw)), name
                     except ValidationError as ve:
@@ -311,6 +344,19 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
                         emit("router", f"{name} parse failed · failing over")
                         next_provider = True  # a new key won't change the output
                         break
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code
+                    last_err = f"{name}: HTTP {code}"
+                    if code < 500:
+                        # Client error (bad request/param, bad auth) — retrying the
+                        # identical request won't help, so fail over immediately with
+                        # a clear code. A 400 here is most likely a rejected param
+                        # (e.g. reasoning_effort), NOT an outage — surface it as such.
+                        emit("router", f"{name} HTTP {code} · client error · failing over")
+                        next_provider = True
+                        break
+                    emit("router", f"{name} HTTP {code} · server error · retrying")
+                    time.sleep(min(1.5 ** attempt, 4.0))
                 except httpx.HTTPError as e:
                     last_err = f"{name}: {e}"
                     emit("router", f"{name} error · {type(e).__name__}")
