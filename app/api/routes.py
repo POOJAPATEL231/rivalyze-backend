@@ -71,8 +71,10 @@ def analyze_company(req: AnalyzeCompanyRequest, background_tasks: BackgroundTask
 @router.post("/analyze/idea", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
 def analyze_idea(req: AnalyzeIdeaRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
     """Idea mode only — the split-out sibling of /analyze. No cached flag: idea mode
-    has no company to match a prior report against."""
-    full_req = AnalyzeRequest(company="", domain="", idea=req.idea)
+    has no company to match a prior report against. Optional structured intake
+    (industry/geography/customer/model/stage) rides along so the idea pre-step can
+    pin the market instead of guessing it from the sentence alone."""
+    full_req = AnalyzeRequest(company="", domain="", idea=req.idea, idea_context=req.to_context())
     return _run_analyze(full_req, background_tasks)
 
 
