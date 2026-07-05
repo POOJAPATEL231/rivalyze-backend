@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS runs (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id             text NOT NULL UNIQUE,          -- "rivalyze-notion-a1b2c3"
   company_id         uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  user_id            uuid REFERENCES users(id) ON DELETE CASCADE,  -- owner; nullable so legacy rows survive
   status             text NOT NULL DEFAULT 'queued',-- queued|running|completed|failed
   current_stage      text NOT NULL DEFAULT 'queued',-- discovery|news|product|review|merge|strategist|validate|done
   threat_level       text,                          -- filled by finish_run
@@ -51,8 +52,13 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at         timestamptz NOT NULL DEFAULT now(),
   finished_at        timestamptz
 );
+-- Idempotent migration for databases created before user_id existed: ADD COLUMN
+-- IF NOT EXISTS is a no-op on fresh DBs (the CREATE above already has it) and a
+-- one-time backfill of the column on existing ones. Safe to apply twice.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE CASCADE;
 CREATE INDEX IF NOT EXISTS ix_runs_job_id ON runs (job_id);
 CREATE INDEX IF NOT EXISTS ix_runs_company_status ON runs (company_id, status);
+CREATE INDEX IF NOT EXISTS ix_runs_user ON runs (user_id);
 
 CREATE TABLE IF NOT EXISTS reports (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

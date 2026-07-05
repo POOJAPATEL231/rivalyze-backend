@@ -8,11 +8,11 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from ..core.auth import require_token
+from ..core.auth import get_current_user, require_token
 from ..core.delta import compute_delta
 from ..core.export import report_to_markdown
 from ..db import connection, repository
-from ..models import HistoryEntry
+from ..models import HistoryEntry, UserPublic
 
 router = APIRouter(prefix="/api/v1")
 
@@ -40,15 +40,18 @@ def _flag_new_changes(rows: list[dict]) -> list[dict]:
     return rows
 
 
-@router.get("/history", response_model=list[HistoryEntry], dependencies=[Depends(require_token)])
+@router.get("/history", response_model=list[HistoryEntry])
 def history(
     company: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
+    current_user: UserPublic = Depends(get_current_user),
 ) -> list[dict]:
-    """Completed runs, newest first; ?company= does an ILIKE substring match.
-    Each company's newest row carries has_new — the "new changes" popup flag
-    (see HistoryEntry.has_new; details via GET /companies/{slug}/delta)."""
-    rows = repository.get_history(limit=limit, company=company)
+    """The CALLER's completed runs, newest first; ?company= does an ILIKE substring
+    match. Scoped to current_user (the run owner stamped at /analyze time) so one
+    user never sees another's runs. Each company's newest row carries has_new — the
+    "new changes" popup flag (see HistoryEntry.has_new; details via GET
+    /companies/{slug}/delta)."""
+    rows = repository.get_history(limit=limit, company=company, user_id=current_user.user_id)
     if connection.is_enabled():
         rows = _flag_new_changes(rows)
     return rows

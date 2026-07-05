@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import connection  # noqa: E402
 from app.main import app  # noqa: E402
+from tests.authutil import cleanup_users, make_user  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not connection.is_enabled(),
                                 reason="requires a database (set DATABASE_URL or PG*)")
@@ -28,14 +29,20 @@ client = TestClient(app)
 TAG = uuid.uuid4().hex[:8]
 COMPANY = f"SmokeCo{TAG}"          # unique per run; slug = lower(COMPANY)
 
+# /analyze now identifies the caller (get_current_user); one module user
+# authenticates every analyze call. _AUTH["headers"] carries its JWT.
+_AUTH: dict = {}
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _cleanup():
+    _AUTH.update(make_user())
     yield
     # deleting the company cascades to its runs + competitors
     with connection.pool().connection() as c, c.cursor() as cur:
         cur.execute("DELETE FROM companies WHERE slug = %s", (COMPANY.lower(),))
         c.commit()
+    cleanup_users(_AUTH.get("user_id"))
 
 
 def test_health_is_open_and_shaped():
@@ -45,7 +52,8 @@ def test_health_is_open_and_shaped():
 
 
 def test_analyze_then_poll_reaches_gate_and_persists():
-    r = client.post("/api/v1/analyze", json={"company": COMPANY, "domain": "testing"})
+    r = client.post("/api/v1/analyze", json={"company": COMPANY, "domain": "testing"},
+                    headers=_AUTH["headers"])
     assert r.status_code == 200
     assert r.json()["status"] == "running_discovery"       # phase-1 status
     job_id = r.json()["job_id"]
@@ -77,6 +85,7 @@ def test_unknown_job_returns_404():
 
 
 def test_empty_request_returns_422():
-    r = client.post("/api/v1/analyze", json={"company": "", "idea": None})
+    r = client.post("/api/v1/analyze", json={"company": "", "idea": None},
+                    headers=_AUTH["headers"])
     assert r.status_code == 422
     assert r.json()["detail"] == "provide a company or an idea"

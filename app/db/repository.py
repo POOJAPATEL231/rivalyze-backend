@@ -86,10 +86,10 @@ class _MemStore:
             rec["name"], rec["domain"] = name, (domain or rec["domain"])
         return rec["id"]
 
-    def create_run(self, job_id: str, company_id: str) -> str:
+    def create_run(self, job_id: str, company_id: str, user_id: str | None = None) -> str:
         rid = _uuid.uuid4().hex
         self.runs[job_id] = {
-            "id": rid, "job_id": job_id, "company_id": company_id,
+            "id": rid, "job_id": job_id, "company_id": company_id, "user_id": user_id,
             "status": "queued", "current_stage": "queued",
             "threat_level": None, "report_confidence": None, "error": None,
             "events": [], "lane_stats": {},
@@ -157,10 +157,13 @@ class _MemStore:
                     return {"job_id": r["job_id"], "run_id": r["id"]}
         return None
 
-    def get_history(self, limit: int = 20, company: str | None = None) -> list[dict]:
+    def get_history(self, limit: int = 20, company: str | None = None,
+                    user_id: str | None = None) -> list[dict]:
         out: list[dict] = []
         for r in reversed(list(self.runs.values())):
             if r["status"] != "completed":
+                continue
+            if r.get("user_id") != user_id:
                 continue
             name = self._company_name(r["company_id"])
             if company and company.lower() not in name.lower():
@@ -259,18 +262,22 @@ def create_company(name: str, domain: str = "") -> str:
 
 
 # ================================= runs ==================================
-def create_run(job_id: str, company_id: str) -> str:
+def create_run(job_id: str, company_id: str, user_id: str | None = None) -> str:
     """Insert the run row; returns the new run id.
 
     Takes a company_id, not a name — callers that only have a company name
     (e.g. lifecycle.start_run) call create_company(name, domain) first and
     pass its id here. Two small calls instead of a combined one so create_run
     never silently mutates the companies table.
+
+    user_id stamps the owner so GET /history can scope rows to the caller. It is
+    nullable (legacy rows and non-user-initiated runs carry NULL); when None the
+    INSERT records no owner and that run never surfaces in a user-scoped history.
     """
-    sql = "INSERT INTO runs (job_id, company_id) VALUES (%s, %s) RETURNING id::text"
+    sql = "INSERT INTO runs (job_id, company_id, user_id) VALUES (%s, %s, %s) RETURNING id::text"
     with get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (job_id, company_id))
+            cur.execute(sql, (job_id, company_id, user_id))
             return cur.fetchone()[0]
 
 
@@ -660,6 +667,7 @@ _HISTORY_BASE = """
     FROM runs r
     JOIN companies c ON c.id = r.company_id
     WHERE r.status = 'completed'
+      AND r.user_id = %s
 """
 _HISTORY_FILTERED = _HISTORY_BASE + """
     AND c.name ILIKE %s
@@ -672,8 +680,14 @@ _HISTORY_UNFILTERED = _HISTORY_BASE + """
 """
 
 
-def get_history(limit: int = 20, company: str | None = None) -> list[dict]:
-    """Completed runs, newest first, optionally filtered by company (ILIKE substring).
+def get_history(limit: int = 20, company: str | None = None,
+                user_id: str | None = None) -> list[dict]:
+    """Completed runs for a single user, newest first, optionally filtered by
+    company (ILIKE substring).
+
+    user_id scopes the result to the caller (stamped at create_run time) so one
+    user never sees another's runs. Legacy rows with a NULL owner never match and
+    are correctly excluded.
 
     Two fixed, fully-static queries (filtered/unfiltered) instead of building
     the WHERE clause dynamically — no string formatting anywhere near SQL text,
@@ -682,9 +696,9 @@ def get_history(limit: int = 20, company: str | None = None) -> list[dict]:
     MS SQL note: ILIKE is Postgres's case-insensitive LIKE — no COLLATE dance needed.
     """
     if company:
-        sql, params = _HISTORY_FILTERED, (f"%{company}%", limit)
+        sql, params = _HISTORY_FILTERED, (user_id, f"%{company}%", limit)
     else:
-        sql, params = _HISTORY_UNFILTERED, (limit,)
+        sql, params = _HISTORY_UNFILTERED, (user_id, limit)
     with get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, params)

@@ -16,7 +16,7 @@ GET /history and GET /reports/{id}/export live in app/api/history_routes.py
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from ..core import lifecycle
-from ..core.auth import require_token
+from ..core.auth import get_current_user, require_token
 from ..db import repository
 from ..models import (
     AnalyzeCompanyRequest,
@@ -28,54 +28,61 @@ from ..models import (
     EvidenceResponse,
     EvidenceRow,
     RunStatus,
+    UserPublic,
 )
 
 router = APIRouter(prefix="/api/v1")
 
 
 def _run_analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks,
-                 cached: bool = False) -> AnalyzeResponse:
+                 user_id: str, cached: bool = False) -> AnalyzeResponse:
     """Shared logic behind /analyze, /analyze/company and /analyze/idea.
 
     DEFAULT: always run a fresh two-phase analysis. The stored report is tied to the
     rivals chosen LAST time, so silently returning it on a re-run showed stale data and
     blocked re-selecting rivals. The instant stored report is OPT-IN (cached=true); past
     reports are also available via GET /history + GET /reports/{run_id}.
+
+    user_id is the authenticated caller; it flows into create_run so the run is owned
+    and shows up in that user's (and only that user's) GET /history.
     """
     if req.company.strip() and cached:
         existing = lifecycle.find_completed(req.company)
         if existing:
             return AnalyzeResponse(job_id=existing, status="completed")
-    return lifecycle.start_run(req, background_tasks)
+    return lifecycle.start_run(req, background_tasks, user_id)
 
 
-@router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
+@router.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks,
+            current_user: UserPublic = Depends(get_current_user),
             cached: bool = Query(False, description="opt in to instantly return the last "
                                  "completed report for this company instead of running a "
                                  "fresh analysis. Default runs fresh.")) -> AnalyzeResponse:
     if not req.company.strip() and not (req.idea or "").strip():
         raise HTTPException(status_code=422, detail="provide a company or an idea")
-    return _run_analyze(req, background_tasks, cached)
+    return _run_analyze(req, background_tasks, current_user.user_id, cached)
 
 
-@router.post("/analyze/company", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
+@router.post("/analyze/company", response_model=AnalyzeResponse)
 def analyze_company(req: AnalyzeCompanyRequest, background_tasks: BackgroundTasks,
+                    current_user: UserPublic = Depends(get_current_user),
                     cached: bool = Query(False, description="opt in to return the last completed "
                                          "report instead of running a fresh analysis")) -> AnalyzeResponse:
     """Company + domain mode only — the split-out sibling of /analyze."""
     full_req = AnalyzeRequest(company=req.company, domain=req.domain, idea=None)
-    return _run_analyze(full_req, background_tasks, cached)
+    return _run_analyze(full_req, background_tasks, current_user.user_id, cached)
 
 
-@router.post("/analyze/idea", response_model=AnalyzeResponse, dependencies=[Depends(require_token)])
-def analyze_idea(req: AnalyzeIdeaRequest, background_tasks: BackgroundTasks) -> AnalyzeResponse:
+@router.post("/analyze/idea", response_model=AnalyzeResponse)
+def analyze_idea(req: AnalyzeIdeaRequest, background_tasks: BackgroundTasks,
+                 current_user: UserPublic = Depends(get_current_user)) -> AnalyzeResponse:
     """Idea mode only — the split-out sibling of /analyze. No cached flag: idea mode
     has no company to match a prior report against. Optional structured intake
     (industry/geography/customer/model/stage) rides along so the idea pre-step can
     pin the market instead of guessing it from the sentence alone."""
     full_req = AnalyzeRequest(company="", domain="", idea=req.idea, idea_context=req.to_context())
-    return _run_analyze(full_req, background_tasks)
+    return _run_analyze(full_req, background_tasks, current_user.user_id)
 
 
 @router.get("/runs/{job_id}", response_model=RunStatus, dependencies=[Depends(require_token)])
