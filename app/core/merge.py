@@ -96,6 +96,9 @@ def merge_node(state: dict, emit) -> dict:
         evidence_index[eid] = {
             "agent": agent, "competitor": competitor, "type": source_type,
             "claim_ref": claim_ref, "url": row.url, "source_name": row.source_name,
+            # source_date rides along so the Stats Node can compute freshest_signal_days
+            # without re-reading the DB (additive; unused by the strategist prompt).
+            "source_date": row.source_date,
             # snippet rides in the index so the strategist can render a readable
             # EVIDENCE LEDGER (id -> fact) and cite ids it can actually SEE, instead
             # of hallucinating opaque hex ids that then get stripped as unknown.

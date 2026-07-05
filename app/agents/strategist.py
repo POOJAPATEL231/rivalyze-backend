@@ -27,17 +27,31 @@ from pydantic import BaseModel, Field
 
 from app.core.llm_router import complete
 from app.core.merge import EVIDENCE_INDEX_KEY
+from app.core.stats import compute_stats
 from app.models import (
     CompetitiveReport,
     H2HRow,
     Opportunity,
     Recommendation,
+    ReportStats,
     SentimentScore,
     Swot,
     UnifiedSignals,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _report_stats(evidence_index: dict, signals, rivals, sentiment, recs) -> ReportStats | None:
+    """Deterministic "By the numbers" block. Additive and best-effort: any failure
+    degrades to None so the Stats Node can never fail a report (pure-function
+    contract, wrapped here)."""
+    try:
+        return ReportStats(**compute_stats(list(evidence_index.values()), signals,
+                                           rivals, sentiment, recs))
+    except Exception as exc:  # noqa: BLE001 — stats are additive; never sink the report
+        logger.debug("strategist: stats skipped (%s)", type(exc).__name__)
+        return None
 
 # Sentinel the MOCK lane keys on to emit a valid CompetitiveReport offline.
 _SENTINEL = "RIVALYZE_STRATEGIST"
@@ -100,12 +114,13 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
     opps = _clean_cited(draft.opportunities, evidence_index, confidence_fn, emit,
                         kind="opportunity")
     threat = draft.threat_level.upper() if draft.threat_level.upper() in _THREATS else "MEDIUM"
+    sentiment = _coerce_sentiment(draft.sentiment, rivals)
     return CompetitiveReport(
         company=company,
         threat_level=threat,
         executive_summary=draft.executive_summary or "No executive summary was produced this run.",
         swot=draft.swot,
-        sentiment=_coerce_sentiment(draft.sentiment, rivals),
+        sentiment=sentiment,
         head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index), rivals),
         opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
                        for o in opps],
@@ -114,6 +129,7 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
                                         claim_ref=r.claim_ref) for r in recs],
         low_signal_findings=list(unified.low_signal_findings or []),
         analysis_date=today,
+        stats=_report_stats(evidence_index, unified.signals, rivals, sentiment, recs),
     )
 
 
@@ -318,6 +334,12 @@ def _recompute(evidence_ids: list[str], index: dict, confidence_fn) -> float:
 
 
 def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveReport:
+    # Even when synthesis fails, the numbers we DID gather are honest and worth
+    # showing ("N sources across M competitors"), so compute stats from the raw
+    # evidence/signals. No sentiment/recs exist here, so those fields stay empty.
+    per = dict(unified.per_competitor or {})
+    evidence_index = per.pop(EVIDENCE_INDEX_KEY, {}) or {}
+    rivals = list(per.keys())
     return CompetitiveReport(
         company=company,
         threat_level="MEDIUM",
@@ -332,6 +354,7 @@ def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveR
         low_signal_findings=list(unified.low_signal_findings or [])
         + ["strategist: model unavailable — degraded report"],
         analysis_date=today,
+        stats=_report_stats(evidence_index, unified.signals, rivals, {}, []),
     )
 
 
