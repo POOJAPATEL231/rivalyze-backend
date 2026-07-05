@@ -16,9 +16,8 @@ GET /history and GET /reports/{id}/export live in app/api/history_routes.py
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from ..core import lifecycle
-from ..core.auth import require_token
-from ..core.suggestions import suggested_questions
 from ..core.auth import get_current_user, require_token
+from ..core.suggestions import suggested_questions
 from ..db import repository
 from ..models import (
     AnalyzeCompanyRequest,
