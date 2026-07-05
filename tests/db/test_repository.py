@@ -215,8 +215,22 @@ def test_save_evidence_is_idempotent_on_id(run):
 def test_find_completed_report(run):
     assert repo.find_completed_report(run["company"]["name"]) is None
     repo.finish_run(run["job_id"], "MEDIUM", 0.5)
+    # completed but no report row yet -> still not found (skips empty/degraded reports,
+    # see find_completed_report's docstring — a later main change, not the original contract)
+    assert repo.find_completed_report(run["company"]["name"]) is None
+
+    repo.save_report(run["run_id"], {"recommendations": [{"action": "do X"}]})
     found = repo.find_completed_report(run["company"]["name"].upper())  # case-insensitive
     assert found == {"job_id": run["job_id"], "run_id": run["run_id"]}
+
+
+def test_find_completed_report_skips_report_with_no_real_content(run):
+    repo.finish_run(run["job_id"], "MEDIUM", 0.5)
+    repo.save_report(run["run_id"], {
+        "recommendations": [], "head_to_head": [], "opportunities": [],
+        "swot": {"strengths": []},
+    })
+    assert repo.find_completed_report(run["company"]["name"]) is None
 
 
 def test_get_history_filters_and_orders_newest_first(company):
