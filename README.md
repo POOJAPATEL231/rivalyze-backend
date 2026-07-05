@@ -3,6 +3,15 @@ Multi-agent competitive intelligence. 5 AI agents in a 7-node LangGraph pipeline
 discovery → [news ‖ product ‖ review] → merge → strategist → validate.
 Every claim is backed by an evidence row; confidence is computed, never model-asserted.
 
+## Documentation
+- **[Is it production-ready? The proof](docs/PRODUCTION_READINESS.md)** — stack, multi-agent
+  failover (multi-key rotation, 4-lane LLM router), security posture, ~239-test coverage
+- **[Backend developer reference](docs/BACKEND.md)** — every endpoint, table, config flag,
+  pipeline internal, and invariant
+- [Data dictionary](docs/data_dictionary.md) · [Agent prompts](docs/llm_prompts.md) ·
+  [Frontend: report stats](docs/FRONTEND_STATS_INTEGRATION.md) ·
+  [Frontend: idea intake](docs/FRONTEND_IDEA_INTAKE.md)
+
 ## Run
     pip install -r requirements.txt
     MOCK_MODE=1 uvicorn app.main:app --port 8000   # offline, zero keys
