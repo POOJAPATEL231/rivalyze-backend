@@ -58,12 +58,19 @@ def history(
 
 
 @router.get("/reports/{run_id}/export", dependencies=[Depends(require_token)])
-def export_report(run_id: str, format: str = Query(default="md")) -> Response:
-    """text/markdown attachment for a completed run's report.
+def export_report(run_id: str, format: str = Query(default="md"),
+                  refresh: bool = Query(default=False,
+                                        description="re-render the markdown from the current "
+                                        "report instead of serving the cached copy — use after "
+                                        "the report gained new sections (e.g. verdict)")) -> Response:
+    """text/markdown attachment for a completed run's report — the SAME data as
+    GET /reports/{run_id}, just rendered as markdown instead of JSON.
 
     The rendered markdown is cached on reports.md_export on first export
     (schema.sql documents it as exactly that) so a repeat download for the
-    same run is a plain read, not a re-render.
+    same run is a plain read, not a re-render. Pass ?refresh=true to bypass a
+    STALE cache: a report exported before a new section existed (verdict/stats)
+    would otherwise keep serving the old markdown forever.
 
     Untrusted-content note: this markdown embeds model-authored text
     (executive_summary, SWOT items, rival names, opportunity/recommendation
@@ -81,9 +88,12 @@ def export_report(run_id: str, format: str = Query(default="md")) -> Response:
         raise HTTPException(status_code=404, detail="report not found")
 
     md = row.get("md_export")
-    if not md:
+    if not md or refresh:
         report = row["report"]
-        md = report_to_markdown(report, repository.get_evidence_by_ids)
+        # all evidence for the run feeds the full "Sources" appendix, so the md lists
+        # every distinct source (parity with stats.distinct_sources), not just cited ids
+        all_evidence = repository.get_all_evidence_for_run(run_id)
+        md = report_to_markdown(report, repository.get_evidence_by_ids, all_evidence)
         repository.save_report(run_id, report, md)
 
     company_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", row["report"].get("company", "report")).strip("-") or "report"
