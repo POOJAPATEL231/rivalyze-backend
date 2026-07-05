@@ -172,3 +172,45 @@ def test_history_first_run_company_not_flagged(company):
     _seed_run(company["id"], _BASE_R0)
     rows = _history_rows(company["name"])
     assert len(rows) == 1 and rows[0]["has_new"] is False
+
+
+# ------------- POST /companies/{slug}/refresh (monitoring re-run) -------------
+@requires_db
+def test_refresh_unknown_slug_404():
+    r = client.post(f"/api/v1/companies/no-such-slug-{uuid.uuid4().hex}/refresh")
+    assert r.status_code == 404
+
+
+@requires_db
+def test_refresh_without_prior_run_409(company):
+    r = client.post(f"/api/v1/companies/{company['slug']}/refresh")
+    assert r.status_code == 409
+
+
+@requires_db
+def test_refresh_reruns_agents_and_feeds_the_delta(company):
+    # week 1: a completed run with confirmed rivals + its signals
+    r0 = _seed_run(company["id"], _BASE_R0, backdate_days=7)
+    repository.replace_competitors(r0, [{"name": "ClickUp", "category": "direct",
+                                         "rationale": "closest overlap"}])
+
+    # week 2: the refresh trigger — no confirmation gate, phase 2 runs directly
+    r = client.post(f"/api/v1/companies/{company['slug']}/refresh")
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "running_analysis"
+    job_id = body["job_id"]
+
+    # under TestClient the background task ran synchronously -> run is done
+    s = client.get(f"/api/v1/runs/{job_id}").json()
+    assert s["status"] == "completed" and s["run_id"]
+
+    # the delta now compares the refresh run against week 1 (not first_run)
+    d = client.get(f"/api/v1/companies/{company['slug']}/delta").json()
+    assert "first_run" not in d
+    assert d["company"] == company["name"] and d["count"] >= 0
+
+
+def test_refresh_requires_token_401(monkeypatch):
+    monkeypatch.setattr(config, "BEARER_TOKEN", "s3cret-token")
+    assert client.post("/api/v1/companies/anything/refresh").status_code == 401
