@@ -137,6 +137,25 @@ class H2HRow(BaseModel):
     rivals: dict[str, H2HCell] = Field(default_factory=dict)
 
 
+class ReportStats(BaseModel):
+    """Deterministic "By the numbers" aggregates (app/core/stats.py). Every field is
+    a COUNT / GROUP BY of evidence + signals rows already stored this run — no
+    estimates, so it can't hallucinate. Additive & optional: absent on older reports
+    and on degraded runs, so old renderers ignore it and the report validates without
+    it. Rates are None (not 0) when their denominator is empty."""
+
+    evidence_count: int = 0                                          # total evidence rows
+    competitors_analyzed: int = 0
+    sources_per_competitor: dict[str, int] = Field(default_factory=dict)
+    source_type_breakdown: dict[str, int] = Field(default_factory=dict)  # the donut; sums to evidence_count
+    signals_by_type: dict[str, int] = Field(default_factory=dict)
+    competitors_with_complaints: int = 0                            # <= competitors_analyzed
+    sentiment_spread: dict[str, int] = Field(default_factory=dict)  # {POSITIVE,NEUTRAL,NEGATIVE}
+    avg_confidence: Optional[float] = None                          # mean rec confidence, 0-1 (None if no recs)
+    freshest_signal_days: Optional[int] = None                     # age of newest dated evidence (None if undated)
+    corroboration_rate: Optional[int] = None                       # % of claims with 2+ sources (None if no claims)
+
+
 class CompetitiveReport(BaseModel):
     company: str
     threat_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -148,6 +167,7 @@ class CompetitiveReport(BaseModel):
     recommendations: list[Recommendation] = Field(default_factory=list, max_length=3)
     low_signal_findings: list[str] = Field(default_factory=list)
     analysis_date: str
+    stats: Optional[ReportStats] = None  # additive "By the numbers" strip; None on degraded/old runs
 
 
 # ========================= API / run lifecycle ==========================
