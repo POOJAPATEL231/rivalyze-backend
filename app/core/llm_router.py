@@ -7,19 +7,33 @@ Behavior (per the v2 plan §4.6):
   No blind sleeps. Structured output is validated with Pydantic; a parse
   failure triggers one JSON-repair pass, then lane failover.
 
+  On top of that REACTIVE failover, every lane also carries a daily budget
+  from budgets.json (read via app.core.counters, Tushar's Redis-backed
+  scoreboard). Before a lane is even tried, we check whether it has already
+  used up its daily allowance and skip it PROACTIVELY — so a lane that's
+  about to 429 doesn't even get asked. If every lane is over budget, the
+  cap is ignored rather than refusing to run at all: a soft daily counter
+  should never be the reason a run comes back empty.
+
 MOCK_MODE=1 short-circuits to a deterministic offline lane so the whole
 slice runs with zero keys (Saturday 10:00 wiring check).
 
-Base ported from the POC vertical slice. Mihir hardens this in place
-(budgets, lane_stats accounting, demo-reserve switch) — same signature.
+Base ported from the POC vertical slice. Budget-aware routing wired in
+per counters.py's documented contract; a genuine reasoning-model lane
+(Groq's deepseek-r1-distill-llama-70b) added to the "reason" list so the
+strategist has one real chain-of-thought option, since Gemini's own
+reasoning_effort is forced to "none" below to avoid truncating the JSON.
 """
 import json
 import os
 import re
 import time
+from pathlib import Path
 
 import httpx
 from pydantic import BaseModel, ValidationError
+
+from app.core import counters
 
 MOCK = os.getenv("MOCK_MODE", "0") == "1"
 
@@ -36,23 +50,68 @@ def _model(env_name: str, default: str) -> str:
     return os.getenv(env_name, default)
 
 
+# Each row is (name, base_url, key_env, model, budget_key). budget_key looks
+# up the daily cap in budgets.json and the usage counter in Redis (via
+# app.core.counters) — see _under_budget() below. Two rows can share a
+# budget_key (both cerebras rows share "cerebras") when they draw from the
+# same provider quota; give a row its own budget_key when it draws from a
+# genuinely separate quota (e.g. groq_8b vs groq_70b vs groq_deepseek are
+# three different Groq models with three different daily allowances).
 LANES = {
     "extract": [
-        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_EXTRACT_MODEL", "llama-3.1-8b-instant")),
-        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash")),
-        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b")),
-        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL_ALT", "zai-glm-4.7")),
-        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_EXTRACT_MODEL", "meta-llama/llama-3.3-70b-instruct:free")),
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_EXTRACT_MODEL", "llama-3.1-8b-instant"),  "groq_8b"),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash"), "gemini"),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b"),               "cerebras"),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL_ALT", "zai-glm-4.7"),            "cerebras"),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_EXTRACT_MODEL", "meta-llama/llama-3.3-70b-instruct:free"), "openrouter"),
     ],
     "reason": [
-        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash")),
-        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b")),
-        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_REASON_MODEL", "llama-3.3-70b-versatile")),
-        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_REASON_MODEL", "deepseek/deepseek-chat-v3.1:free")),
+        # Real chain-of-thought, free, on Groq. Tried FIRST so the strategist
+        # gets a genuine reasoning pass before falling back to non-reasoning
+        # models. Uses its own budget key since it's a separate daily allowance
+        # from the 70b-versatile row further down.
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_DEEPSEEK_MODEL", "deepseek-r1-distill-llama-70b"), "groq_deepseek"),
+        ("gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", _model("GEMINI_MODEL", "gemini-2.5-flash"), "gemini"),
+        ("cerebras",   "https://api.cerebras.ai/v1",            "CEREBRAS_API_KEY",   _model("CEREBRAS_MODEL", "gpt-oss-120b"),               "cerebras"),
+        ("groq",       "https://api.groq.com/openai/v1",        "GROQ_API_KEY",       _model("GROQ_REASON_MODEL", "llama-3.3-70b-versatile"), "groq_70b"),
+        ("openrouter", "https://openrouter.ai/api/v1",          "OPENROUTER_API_KEY", _model("OPENROUTER_REASON_MODEL", "deepseek/deepseek-chat-v3.1:free"), "openrouter"),
     ],
 }
 ATTEMPTS_PER_LANE = 2
 TIMEOUT = 45.0
+
+# --- Daily budget check (proactive, on top of the reactive 429 failover above) ---
+# budgets.json lives at the repo root (two levels up from app/core/). It's a
+# flat {"budget_key": daily_cap} map — see the file itself for current caps.
+_BUDGETS_PATH = Path(__file__).resolve().parent.parent.parent / "budgets.json"
+
+
+def _load_budgets() -> dict:
+    try:
+        return json.loads(_BUDGETS_PATH.read_text())
+    except Exception:
+        # Missing/unreadable/corrupt budgets.json must never take the router
+        # down with it — treat it the same as "no caps configured" (every
+        # lane allowed) rather than raising at import time.
+        return {}
+
+
+_BUDGETS = _load_budgets()
+
+
+def _under_budget(budget_key: str) -> bool:
+    """True if budget_key has NOT hit its daily cap yet. A budget_key with
+    no entry in budgets.json is treated as uncapped (always True) — the cap
+    is opt-in per lane, not a default restriction. Counter reads go through
+    counters.py, which already never raises and returns 0 if Redis is down,
+    so an unavailable counter behaves the same as "nothing used yet today"
+    rather than blocking the lane."""
+    cap = _BUDGETS.get(budget_key)
+    if cap is None:
+        return True
+    used = counters.counter_get(counters.today_key(budget_key))
+    return used < cap
+
 
 # Response-size budget per task class. Extraction outputs are small (a handful of
 # typed items); the strategist's CompetitiveReport is large — full SWOT, sentiment
@@ -274,12 +333,22 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
         except ValidationError as ve:
             raise RuntimeError(f"mock lane schema-fail: {ve.errors()[0]['msg']}")
 
-    lanes = [lane for lane in LANES[task_class] if _keys_for(lane[2])]
-    if not lanes:
+    configured = [lane for lane in LANES[task_class] if _keys_for(lane[2])]
+    if not configured:
         raise RuntimeError("no LLM lane configured — set at least one *_API_KEY")
 
+    # Proactive budget check: try only lanes still under their daily cap.
+    # If EVERY configured lane is over budget, fall back to the full list
+    # anyway — the cap is a soft daily guardrail (and the counter itself can
+    # be stale/wrong if Redis hiccuped), not a hard reason to return nothing
+    # when a real request is waiting on an answer.
+    lanes = [lane for lane in configured if _under_budget(lane[4])]
+    if not lanes:
+        emit("router", "all lanes at/over daily budget · ignoring cap for this call")
+        lanes = configured
+
     last_err = "unknown"
-    for name, base, key_env, model in lanes:
+    for name, base, key_env, model, budget_key in lanes:
         keys = _keys_for(key_env)
         for ki, key in enumerate(keys, 1):
             tag = f" · key {ki}/{len(keys)}" if len(keys) > 1 else ""
@@ -287,6 +356,10 @@ def complete(task_class: str, prompt: str, schema: type[BaseModel],
             for attempt in range(1, ATTEMPTS_PER_LANE + 1):
                 try:
                     emit("router", f"{name}/{model} · attempt {attempt}{tag}")
+                    # Count this as real usage against the lane's daily budget
+                    # the moment we actually send it — an attempt that fails
+                    # still consumed one of the provider's real daily requests.
+                    counters.counter_incr(counters.today_key(budget_key))
                     payload = {"model": model, "temperature": 0.1,
                                "max_tokens": _max_tokens(task_class),  # task-aware: reason needs room for the full report
                                "response_format": {"type": "json_object"},
