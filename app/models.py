@@ -158,6 +158,27 @@ class ReportStats(BaseModel):
     uncorroborated_claims: int = 0                                 # claims resting on a single source
 
 
+class Verdict(BaseModel):
+    """Bottom-line judgment for the Side-by-side "Verdict" box, computed
+    deterministically in app/agents/strategist.py::_build_verdict.
+
+    Additive & optional like ReportStats: absent on older/degraded reports, so old
+    renderers ignore it and the report still validates without it. Every field is
+    DERIVED from data already in THIS report (threat_level, sentiment, head_to_head,
+    recommendations, stats) — nothing is invented, so it cannot assert a claim the
+    rest of the report doesn't already support."""
+
+    threat_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "MEDIUM"
+    headline: str = ""                                   # one-line judgment
+    summary: str = ""                                    # 2-4 sentence bottom line
+    rivals: list[str] = Field(default_factory=list)      # confirmed rivals compared
+    biggest_threat: Optional[str] = None                 # the most-covered / most-active rival
+    openings: list[str] = Field(default_factory=list)    # rivals with NEGATIVE sentiment — exploitable
+    you_lead: list[str] = Field(default_factory=list)    # dimensions you provably win
+    top_move: Optional[str] = None                       # highest-confidence recommendation action
+    confidence_note: Optional[str] = None                # "Based on N sources, X% corroborated"
+
+
 class CompetitiveReport(BaseModel):
     company: str
     threat_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -170,6 +191,7 @@ class CompetitiveReport(BaseModel):
     low_signal_findings: list[str] = Field(default_factory=list)
     analysis_date: str
     stats: Optional[ReportStats] = None  # additive "By the numbers" strip; None on degraded/old runs
+    verdict: Optional[Verdict] = None    # additive bottom-line for the Side-by-side view; None on old/degraded runs
 
 
 # ========================= API / run lifecycle ==========================
