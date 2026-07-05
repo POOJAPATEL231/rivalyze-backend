@@ -37,6 +37,7 @@ from app.models import (
     SentimentScore,
     Swot,
     UnifiedSignals,
+    Verdict,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,21 +116,25 @@ def run(unified: UnifiedSignals, company: str, confidence_fn, emit) -> Competiti
                         kind="opportunity")
     threat = draft.threat_level.upper() if draft.threat_level.upper() in _THREATS else "MEDIUM"
     sentiment = _coerce_sentiment(draft.sentiment, rivals)
+    head_to_head = _coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index), rivals)
+    final_recs = [Recommendation(action=r.action, rationale=r.rationale,
+                                 confidence=r.confidence, evidence_ids=r.evidence_ids,
+                                 claim_ref=r.claim_ref) for r in recs]
+    stats = _report_stats(evidence_index, unified.signals, rivals, sentiment, recs)
     return CompetitiveReport(
         company=company,
         threat_level=threat,
         executive_summary=draft.executive_summary or "No executive summary was produced this run.",
         swot=draft.swot,
         sentiment=sentiment,
-        head_to_head=_coerce_h2h(draft.head_to_head, _claim_refs_by_competitor(evidence_index), rivals),
+        head_to_head=head_to_head,
         opportunities=[Opportunity(text=o.text, evidence_ids=o.evidence_ids, claim_ref=o.claim_ref)
                        for o in opps],
-        recommendations=[Recommendation(action=r.action, rationale=r.rationale,
-                                        confidence=r.confidence, evidence_ids=r.evidence_ids,
-                                        claim_ref=r.claim_ref) for r in recs],
+        recommendations=final_recs,
         low_signal_findings=list(unified.low_signal_findings or []),
         analysis_date=today,
-        stats=_report_stats(evidence_index, unified.signals, rivals, sentiment, recs),
+        stats=stats,
+        verdict=_build_verdict(company, threat, sentiment, head_to_head, final_recs, rivals, stats),
     )
 
 
@@ -340,6 +345,7 @@ def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveR
     per = dict(unified.per_competitor or {})
     evidence_index = per.pop(EVIDENCE_INDEX_KEY, {}) or {}
     rivals = list(per.keys())
+    stats = _report_stats(evidence_index, unified.signals, rivals, {}, [])
     return CompetitiveReport(
         company=company,
         threat_level="MEDIUM",
@@ -354,8 +360,101 @@ def _degraded(company: str, today: str, unified: UnifiedSignals) -> CompetitiveR
         low_signal_findings=list(unified.low_signal_findings or [])
         + ["strategist: model unavailable — degraded report"],
         analysis_date=today,
-        stats=_report_stats(evidence_index, unified.signals, rivals, {}, []),
+        stats=stats,
+        verdict=_build_verdict(company, "MEDIUM", {}, [], [], rivals, stats),
     )
+
+
+# ============================== verdict (deterministic) ==============================
+# Negative-pricing keywords: when a RIVAL's pricing cell reads this way, you provably
+# lead on price/transparency. Mirrors the keyword approach already used by _metric_type.
+_NEG_PRICING = ("high", "expensive", "costly", "overrun", "no tiered",
+                "no public", "premium", "opaque")
+
+
+def _build_verdict(company: str, threat: str, sentiment: dict, head_to_head: list,
+                   recs: list, rivals: list[str], stats: ReportStats | None) -> Verdict:
+    """Deterministic bottom-line for the Side-by-side "Verdict" box. Pure function over
+    data already in the report — never calls the model, never invents a claim, and any
+    failure degrades to a minimal verdict so it can never sink the report."""
+    threat = threat if threat in _THREATS else "MEDIUM"
+    try:
+        rival_names = sorted({*(rivals or []), *(sentiment or {}).keys()})
+        # biggest threat = the rival we gathered the most evidence on (proxy for market activity)
+        spc = (stats.sources_per_competitor if stats else {}) or {}
+        ranked = [r for r in sorted(spc, key=lambda k: spc[k], reverse=True) if spc.get(r, 0) > 0]
+        biggest = ranked[0] if ranked else (rival_names[0] if rival_names else None)
+        # openings = rivals the market is unhappy with (structured NEGATIVE sentiment)
+        openings = sorted(r for r, s in (sentiment or {}).items()
+                          if getattr(s, "label", "") == "NEGATIVE")
+        leads = _verdict_leads(head_to_head, sentiment)
+        top = max(recs, key=lambda r: r.confidence, default=None) if recs else None
+        top_move = top.action if top else None
+        note = None
+        if stats and stats.distinct_sources:
+            corr = (f", {stats.corroboration_rate}% independently corroborated"
+                    if stats.corroboration_rate is not None else "")
+            note = (f"Based on {stats.distinct_sources} sources across "
+                    f"{stats.competitors_analyzed} rivals{corr}.")
+        headline = f"{threat} competitive threat"
+        if biggest:
+            headline += f" — {biggest} is the rival to watch"
+        summary = _verdict_summary(company, threat, biggest, openings, leads, top_move)
+        return Verdict(threat_level=threat, headline=headline, summary=summary,
+                       rivals=rival_names, biggest_threat=biggest, openings=openings,
+                       you_lead=leads, top_move=top_move, confidence_note=note)
+    except Exception as exc:  # noqa: BLE001 — verdict is additive; never sink the report
+        logger.debug("strategist: verdict skipped (%s)", type(exc).__name__)
+        return Verdict(threat_level=threat)
+
+
+def _verdict_leads(head_to_head: list, sentiment: dict) -> list[str]:
+    """Dimensions the input company PROVABLY leads on, from structured data only:
+    customer sentiment (no rival is POSITIVE) and pricing (a rival's pricing cell
+    signals a weakness). Free-text head-to-head cells are never 'scored' for a winner."""
+    leads: list[str] = []
+    labels = [getattr(s, "label", "") for s in (sentiment or {}).values()]
+    if labels and "POSITIVE" not in labels:
+        leads.append("Customer sentiment")
+    for row in (head_to_head or []):
+        if "pric" not in (getattr(row, "metric", "") or "").lower():
+            continue
+        cells = (getattr(row, "rivals", {}) or {}).values()
+        if any(any(k in (getattr(c, "value", "") or "").lower() for k in _NEG_PRICING)
+               for c in cells):
+            leads.append("Pricing")
+        break
+    return leads
+
+
+def _verdict_summary(company: str, threat: str, biggest: str | None,
+                     openings: list[str], leads: list[str], top_move: str | None) -> str:
+    """Compose the 2-4 sentence bottom line from the structured parts above."""
+    parts: list[str] = []
+    if biggest:
+        parts.append(f"{biggest} is {company}'s strongest rival at a {threat} overall threat level.")
+    else:
+        parts.append(f"{company} faces a {threat} competitive threat.")
+    if openings:
+        who = _join(openings)
+        verb = "carry" if len(openings) > 1 else "carries"
+        parts.append(f"{who} {verb} negative market sentiment — a clear opening to win over "
+                     "their customers.")
+    if leads:
+        parts.append(f"You lead on {_join(leads).lower()}.")
+    if top_move:
+        parts.append(f"Top move: {top_move}.")
+    return " ".join(parts)
+
+
+def _join(items: list[str]) -> str:
+    """'a', 'a and b', 'a, b and c' — for a readable inline list."""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def _prompt(company: str, rivals: list[str], evidence_index: dict, rollups: dict) -> str:
