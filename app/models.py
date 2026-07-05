@@ -153,7 +153,9 @@ class ReportStats(BaseModel):
     sentiment_spread: dict[str, int] = Field(default_factory=dict)  # {POSITIVE,NEUTRAL,NEGATIVE}
     avg_confidence: Optional[float] = None                          # mean rec confidence, 0-1 (None if no recs)
     freshest_signal_days: Optional[int] = None                     # age of newest dated evidence (None if undated)
-    corroboration_rate: Optional[int] = None                       # % of claims with 2+ sources (None if no claims)
+    distinct_sources: int = 0                                       # distinct source domains across all evidence
+    corroboration_rate: Optional[int] = None                       # % of claims with 2+ INDEPENDENT sources (None if no claims)
+    uncorroborated_claims: int = 0                                 # claims resting on a single source
 
 
 class CompetitiveReport(BaseModel):

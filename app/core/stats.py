@@ -15,6 +15,7 @@ Honesty rules (Rivalyze_Stats_Node.md):
 from collections import Counter
 from datetime import date, datetime
 from statistics import mean
+from urllib.parse import urlparse
 
 import re
 
@@ -113,15 +114,52 @@ def _sentiment_buckets(sentiment: dict) -> dict:
     return buckets
 
 
-def _corroboration_pct(evidence) -> int | None:
-    """Percent of claim_refs backed by 2+ independent evidence rows — the honesty
-    stat. None when there are no claims (no division by zero)."""
-    groups = Counter(_ev_claim_ref(e) for e in evidence if _ev_claim_ref(e))
+def _domain(url) -> str:
+    """Registrable-ish domain of a URL (lowercased, `www.` stripped), or "" if it
+    has none. Used to judge source INDEPENDENCE — two evidence rows from the same
+    domain are one source, not two."""
+    if not url or not isinstance(url, str):
+        return ""
+    try:
+        net = urlparse(url if "://" in url else "//" + url).netloc.lower()
+    except ValueError:
+        return ""
+    return net[4:] if net.startswith("www.") else net
+
+
+def _source_key(e) -> str:
+    """A stable identity for an evidence row's SOURCE — its domain, else its
+    source_name. Empty when the row names no verifiable source (those collapse
+    together, which under-counts corroboration: the safe, honest direction)."""
+    return _domain(_field(e, "url")) or str(_field(e, "source_name") or "").lower()
+
+
+def _claim_source_sets(evidence) -> dict:
+    """claim_ref -> set of distinct source keys backing it."""
+    groups: dict[str, set] = {}
+    for e in evidence:
+        cr = _ev_claim_ref(e)
+        if cr:
+            groups.setdefault(cr, set()).add(_source_key(e))
+    return groups
+
+
+def _corroboration(evidence):
+    """Returns (pct, uncorroborated_count). A claim is corroborated when 2+ DISTINCT
+    sources back it (not merely 2+ rows — same-domain rows are one source). pct is
+    None when there are no claims (no division by zero)."""
+    groups = _claim_source_sets(evidence)
     total = len(groups)
     if total == 0:
-        return None
-    corroborated = sum(1 for n in groups.values() if n >= 2)
-    return round(100 * corroborated / total)
+        return None, 0
+    corroborated = sum(1 for sources in groups.values() if len(sources) >= 2)
+    return round(100 * corroborated / total), total - corroborated
+
+
+def _distinct_sources(evidence) -> int:
+    """Count of distinct source domains across all evidence — the independence
+    breadth ("evidence from N domains")."""
+    return len({_source_key(e) for e in evidence if _source_key(e)})
 
 
 def compute_stats(evidence, signals, competitors, sentiment, recommendations) -> dict:
@@ -158,6 +196,8 @@ def compute_stats(evidence, signals, competitors, sentiment, recommendations) ->
     rec_conf = [_field(r, "confidence") for r in recommendations or []]
     rec_conf = [c for c in rec_conf if isinstance(c, (int, float))]
 
+    corroboration_rate, uncorroborated = _corroboration(evidence)
+
     return {
         "evidence_count": len(evidence),
         "competitors_analyzed": len(competitors),
@@ -168,5 +208,7 @@ def compute_stats(evidence, signals, competitors, sentiment, recommendations) ->
         "sentiment_spread": _sentiment_buckets(sentiment),
         "avg_confidence": round(mean(rec_conf), 2) if rec_conf else None,
         "freshest_signal_days": _min_age_days(evidence),
-        "corroboration_rate": _corroboration_pct(evidence),
+        "distinct_sources": _distinct_sources(evidence),
+        "corroboration_rate": corroboration_rate,
+        "uncorroborated_claims": uncorroborated,
     }

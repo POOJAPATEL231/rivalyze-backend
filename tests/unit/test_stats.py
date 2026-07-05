@@ -13,10 +13,10 @@ from app.core.stats import compute_stats
 from app.models import CompetitiveReport, ReportStats, Swot
 
 
-def _ev(claim_ref, source_type, competitor="Acme", source_date=""):
+def _ev(claim_ref, source_type, competitor="Acme", source_date="", url="https://u.example"):
     # shape of an evidence_index value (what the strategist passes in)
     return {"claim_ref": claim_ref, "type": source_type, "competitor": competitor,
-            "source_date": source_date, "url": "https://u", "agent": source_type}
+            "source_date": source_date, "url": url, "agent": source_type}
 
 
 def _sig(competitor, type_):
@@ -57,13 +57,28 @@ def test_complaints_match_confirmed_set_case_insensitively():
 
 
 # ------------------------------- TC-ST04 -------------------------------
-def test_corroboration_rate_two_of_three_claims():
-    # claim A: 1 source, claim B: 2 sources, claim C: 2 sources -> 2/3 corroborated
-    ev = [_ev("news:a", "news"),
-          _ev("pricing:b", "pricing"), _ev("pricing:b", "pricing"),
-          _ev("review:c", "review"), _ev("review:c", "review")]
+def test_corroboration_counts_independent_sources():
+    # claim A: 1 source; claim B: 2 distinct domains; claim C: 2 distinct domains
+    ev = [_ev("news:a", "news", url="https://alpha.com/1"),
+          _ev("pricing:b", "pricing", url="https://beta.com/1"),
+          _ev("pricing:b", "pricing", url="https://gamma.com/2"),
+          _ev("review:c", "review", url="https://delta.com/1"),
+          _ev("review:c", "review", url="https://epsilon.com/2")]
     out = compute_stats(ev, [], ["Acme"], {}, [])
-    assert out["corroboration_rate"] == 67                          # round(100 * 2/3)
+    assert out["corroboration_rate"] == 67                          # 2 of 3 claims have 2+ sources
+    assert out["uncorroborated_claims"] == 1                        # claim A rests on one source
+    assert out["distinct_sources"] == 5                             # 5 distinct domains
+
+
+def test_same_domain_twice_is_not_corroboration():
+    # two rows for one claim but the SAME domain -> ONE independent source -> NOT
+    # corroborated. This is the rigor the honesty pitch depends on.
+    ev = [_ev("pricing:b", "pricing", url="https://acme.com/plans"),
+          _ev("pricing:b", "pricing", url="https://acme.com/enterprise")]
+    out = compute_stats(ev, [], ["Acme"], {}, [])
+    assert out["corroboration_rate"] == 0
+    assert out["uncorroborated_claims"] == 1
+    assert out["distinct_sources"] == 1                             # www-stripped, same host
 
 
 # ------------------------------- TC-ST05 -------------------------------
@@ -78,7 +93,9 @@ def test_empty_run_is_all_zeros_none_no_crash():
     assert out["sentiment_spread"] == {"POSITIVE": 0, "NEUTRAL": 0, "NEGATIVE": 0}
     assert out["avg_confidence"] is None                           # no recs -> None, not 0/0
     assert out["freshest_signal_days"] is None
+    assert out["distinct_sources"] == 0
     assert out["corroboration_rate"] is None                       # no claims -> None (no div-by-zero)
+    assert out["uncorroborated_claims"] == 0
     # and it must construct a valid ReportStats
     assert ReportStats(**out).evidence_count == 0
 
